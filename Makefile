@@ -1,4 +1,4 @@
-.PHONY: all sqush
+.PHONY: all build sqush clean format
 
 all: build
 
@@ -10,3 +10,6 @@ sqush: clean
 
 clean:
 	rm -rf build/
+
+format:
+	find . -type f -name "*.cu" -o -name "*.h" | xargs -I{} clang-format -style=file -i {}
