@@ -88,23 +88,41 @@ __global__ void ring(int* dst, int* src) {
   nvshmem_int_put_nbi(dst, src, 1, peer);
 }
 
-int main(int argc, char* argv[]) {
-  auto nvshmem = NVSHMEM(argc, argv);
+struct NVSHMEMRun {
+  NVSHMEM nvshmem;
   cudaStream_t stream;
-  std::cout << nvshmem << std::endl;
+  int* dst;
+  int* src;
 
-  CUDA_CHECK(cudaStreamCreate(&stream));
-  int* src = static_cast<int*>(nvshmem_malloc(sizeof(int)));
-  int* dst = static_cast<int*>(nvshmem_malloc(sizeof(int)));
-  ring<<<1, 1, 0, stream>>>(dst, src);
-  KERNEL_CHECK("Finish ring kernel");
-  nvshmemx_barrier_all_on_stream(stream);
-  CUDA_CHECK(cudaStreamSynchronize(stream));
+  NVSHMEMRun() = delete;
 
-  int msg;
-  CUDA_CHECK(cudaMemcpyAsync(&msg, dst, sizeof(int), cudaMemcpyDeviceToHost, stream));
-  CUDA_CHECK(cudaStreamSynchronize(stream));
-  std::cout << nvshmem.mype << " recv: " << msg << std::endl;
-  nvshmem_free(dst);
-  nvshmem_free(src);
+  __host__ NVSHMEMRun(int argc, char* argv[]) : nvshmem{argc, argv} {
+    std::cout << nvshmem << std::endl;
+    CUDA_CHECK(cudaStreamCreate(&stream));
+    dst = static_cast<int*>(nvshmem_malloc(sizeof(int)));
+    src = static_cast<int*>(nvshmem_malloc(sizeof(int)));
+  }
+
+  __host__ ~NVSHMEMRun() {
+    nvshmem_free(src);
+    nvshmem_free(dst);
+    CUDA_CHECK(cudaStreamDestroy(stream));
+  }
+
+  __host__ void Launch() {
+    ring<<<1, 1, 0, stream>>>(dst, src);
+    nvshmemx_barrier_all_on_stream(stream);
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    // copy data from GPU to CPU
+    int msg;
+    CUDA_CHECK(cudaMemcpyAsync(&msg, dst, sizeof(int), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    std::cout << nvshmem.mype << " recv: " << msg << std::endl;
+  }
+};
+
+int main(int argc, char* argv[]) {
+  auto runner = NVSHMEMRun(argc, argv);
+  runner.Launch();
 }
