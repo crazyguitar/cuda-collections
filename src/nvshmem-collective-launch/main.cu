@@ -18,15 +18,6 @@
     }                                                                                                       \
   } while (0)
 
-#define KERNEL_CHECK(msg)                                                                                   \
-  do {                                                                                                      \
-    cudaError_t err = cudaGetLastError();                                                                   \
-    if (err != cudaSuccess) {                                                                               \
-      fprintf(stderr, "[%s:%d] %s got CUDA error: %s\n", __FILE__, __LINE__, msg, cudaGetErrorString(err)); \
-      exit(1);                                                                                              \
-    }                                                                                                       \
-  } while (0)
-
 #define MPI_CHECK(exp)                                                                \
   do {                                                                                \
     int rc = (exp);                                                                   \
@@ -34,6 +25,15 @@
       fprintf(stderr, "[%s:%d] MPI failed with error %d \n", __FILE__, __LINE__, rc); \
       exit(1);                                                                        \
     }                                                                                 \
+  } while (0)
+
+#define NVSHMEM_CHECK(exp)                                                                \
+  do {                                                                                    \
+    int rc = (exp);                                                                       \
+    if (NVSHMEMX_SUCCESS != rc) {                                                         \
+      fprintf(stderr, "[%s:%d] nvshmem failed with error %d \n", __FILE__, __LINE__, rc); \
+      exit(1);                                                                            \
+    }                                                                                     \
   } while (0)
 
 struct NVSHMEM {
@@ -86,6 +86,8 @@ __global__ void ring(int* dst, int *src) {
   // Note that both dst and src should be on symmetric memory; otherwise, the
   // process will receive segfault.
   nvshmem_int_put_nbi(dst, src, 1, peer);
+  nvshmem_fence();
+  nvshmem_quiet();
 }
 
 int main(int argc, char* argv[]) {
@@ -94,11 +96,13 @@ int main(int argc, char* argv[]) {
   std::cout << nvshmem << std::endl;
 
   CUDA_CHECK(cudaStreamCreate(&stream));
-  int* src = static_cast<int*>(nvshmem_malloc(sizeof(int)));
   int* dst = static_cast<int*>(nvshmem_malloc(sizeof(int)));
-  ring<<<1, 1, 0, stream>>>(dst, src);
-  KERNEL_CHECK("Finish ring kernel");
-  nvshmemx_barrier_all_on_stream(stream);
+  int* src = static_cast<int*>(nvshmem_malloc(sizeof(int)));
+  void *args[] = {&dst, &src};
+  // Base on the document, when the CUDA kernel utilize NVSHMEM synchronization,
+  // nvshmemx_collective_launch must be used.
+  // ref: https://docs.nvidia.com/nvshmem/archives/nvshmem-203/api/docs/api/launch.html?highlight=nvshmemx_collective_launch
+  NVSHMEM_CHECK(nvshmemx_collective_launch((const void *)ring, 1, 1, args, 0, stream));
   CUDA_CHECK(cudaStreamSynchronize(stream));
 
   int msg;
