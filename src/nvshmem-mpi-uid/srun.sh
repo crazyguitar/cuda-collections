@@ -5,7 +5,7 @@ set -exo pipefail
 DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 sqsh="${DIR}/../../cuda+latest.sqsh"
 mount="/fsx:/fsx"
-binary="${DIR}/../../build/src/nvshmem-mpi/nvshmem-mpi"
+binary="${DIR}/../../build/src/nvshmem-mpi-uid/nvshmem-mpi-uid"
 
 cmd="$(cat <<EOF
 export NVSHMEM_DEBUG=INFO
