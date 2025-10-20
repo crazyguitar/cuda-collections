@@ -18,6 +18,15 @@
     }                                                                                                       \
   } while (0)
 
+#define KERNEL_CHECK(msg)                                                                                   \
+  do {                                                                                                      \
+    cudaError_t err = cudaGetLastError();                                                                   \
+    if (err != cudaSuccess) {                                                                               \
+      fprintf(stderr, "[%s:%d] %s got CUDA error: %s\n", __FILE__, __LINE__, msg, cudaGetErrorString(err)); \
+      exit(1);                                                                                              \
+    }                                                                                                       \
+  } while (0)
+
 #define MPI_CHECK(exp)                                                                \
   do {                                                                                \
     int rc = (exp);                                                                   \
@@ -74,7 +83,9 @@ __global__ void ring(int* dst) {
   int npes = nvshmem_n_pes();
   int peer = (mype + 1) % npes;
   *dst = mype;
-  nvshmem_int_p(dst, mype, peer);
+  // not that both dst and src should be on symmetric memory; otherwise, the
+  // process will receive segfault.
+  nvshmem_int_put_nbi(dst, dst, 1, peer);
 }
 
 int main(int argc, char* argv[]) {
@@ -85,6 +96,7 @@ int main(int argc, char* argv[]) {
   CUDA_CHECK(cudaStreamCreate(&stream));
   int* dst = static_cast<int*>(nvshmem_malloc(sizeof(int)));
   ring<<<1, 1, 0, stream>>>(dst);
+  KERNEL_CHECK("Finish ring kernel");
   nvshmemx_barrier_all_on_stream(stream);
   CUDA_CHECK(cudaStreamSynchronize(stream));
 
