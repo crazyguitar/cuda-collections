@@ -78,7 +78,7 @@ struct NVSHMEM {
   }
 };
 
-__global__ void ring(int* dst, int *src) {
+__global__ void ring(int* dst, int* src) {
   int mype = nvshmem_my_pe();
   int npes = nvshmem_n_pes();
   int peer = (mype + 1) % npes;

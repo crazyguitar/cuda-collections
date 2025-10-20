@@ -7,6 +7,7 @@
 * [nvshmem-mpi-uid](src/nvshmem-mpi-uid)
 * [nvshmem-put](src/nvshmem-put)
 * [nvshmem-put-nbi](src/nvshmem-put-nbi)
+* [nvshmem-collective-launch](src/nvshmem-collective-launch)
 
 ```
 # build an enroot sqush file

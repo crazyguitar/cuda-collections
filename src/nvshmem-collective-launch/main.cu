@@ -78,7 +78,7 @@ struct NVSHMEM {
   }
 };
 
-__global__ void ring(int* dst, int *src) {
+__global__ void ring(int* dst, int* src) {
   int mype = nvshmem_my_pe();
   int npes = nvshmem_n_pes();
   int peer = (mype + 1) % npes;
@@ -98,11 +98,11 @@ int main(int argc, char* argv[]) {
   CUDA_CHECK(cudaStreamCreate(&stream));
   int* dst = static_cast<int*>(nvshmem_malloc(sizeof(int)));
   int* src = static_cast<int*>(nvshmem_malloc(sizeof(int)));
-  void *args[] = {&dst, &src};
+  void* args[] = {&dst, &src};
   // Base on the document, when the CUDA kernel utilize NVSHMEM synchronization,
   // nvshmemx_collective_launch must be used.
   // ref: https://docs.nvidia.com/nvshmem/archives/nvshmem-203/api/docs/api/launch.html?highlight=nvshmemx_collective_launch
-  NVSHMEM_CHECK(nvshmemx_collective_launch((const void *)ring, 1, 1, args, 0, stream));
+  NVSHMEM_CHECK(nvshmemx_collective_launch((const void*)ring, 1, 1, args, 0, stream));
   CUDA_CHECK(cudaStreamSynchronize(stream));
 
   int msg;
