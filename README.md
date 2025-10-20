@@ -1,6 +1,10 @@
 # CUDA Collections
 
 * [hello](src/hello)
+* [sum](src/sum)
+* [nvshmem-hello](src/nvshmem-hello)
+* [nvshmem-mpi](src/nvshmem-mpi)
+* [nvshmem-mpi-uid](src/nvshmem-mpi-uid)
 
 ```
 # build an enroot sqush file
