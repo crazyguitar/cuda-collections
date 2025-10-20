@@ -151,6 +151,8 @@ RUN git clone https://github.com/NVIDIA/nvshmem.git /nvshmem \
   && ninja -j $(nproc) \
   && ninja install
 
+# install nvshmemrun
+RUN cd /nvshmem/scripts && bash install_hydra.sh /tmp /opt/hydra && rm -rf /tmp/hydra-*
 RUN pip3 install nvshmem4py-cu12
 
 ENV LD_LIBRARY_PATH=/opt/amazon/pmix/lib:/opt/nvshmem/lib:$LD_LIBRARY_PATH
