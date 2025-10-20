@@ -90,25 +90,45 @@ __global__ void ring(int* dst, int* src) {
   nvshmem_quiet();
 }
 
-int main(int argc, char* argv[]) {
-  auto nvshmem = NVSHMEM(argc, argv);
+struct NVSHMEMRun {
+  NVSHMEM nvshmem;
   cudaStream_t stream;
-  std::cout << nvshmem << std::endl;
+  int* dst;
+  int* src;
 
-  CUDA_CHECK(cudaStreamCreate(&stream));
-  int* dst = static_cast<int*>(nvshmem_malloc(sizeof(int)));
-  int* src = static_cast<int*>(nvshmem_malloc(sizeof(int)));
-  void* args[] = {&dst, &src};
-  // Base on the document, when the CUDA kernel utilize NVSHMEM synchronization,
-  // nvshmemx_collective_launch must be used.
-  // ref: https://docs.nvidia.com/nvshmem/archives/nvshmem-203/api/docs/api/launch.html?highlight=nvshmemx_collective_launch
-  NVSHMEM_CHECK(nvshmemx_collective_launch((const void*)ring, 1, 1, args, 0, stream));
-  CUDA_CHECK(cudaStreamSynchronize(stream));
+  NVSHMEMRun() = delete;
 
-  int msg;
-  CUDA_CHECK(cudaMemcpyAsync(&msg, dst, sizeof(int), cudaMemcpyDeviceToHost, stream));
-  CUDA_CHECK(cudaStreamSynchronize(stream));
-  std::cout << nvshmem.mype << " recv: " << msg << std::endl;
-  nvshmem_free(dst);
-  nvshmem_free(src);
+  __host__ NVSHMEMRun(int argc, char* argv[]) : nvshmem{argc, argv} {
+    std::cout << nvshmem << std::endl;
+    CUDA_CHECK(cudaStreamCreate(&stream));
+    dst = static_cast<int*>(nvshmem_malloc(sizeof(int)));
+    src = static_cast<int*>(nvshmem_malloc(sizeof(int)));
+  }
+
+  __host__ ~NVSHMEMRun() {
+    nvshmem_free(src);
+    nvshmem_free(dst);
+    CUDA_CHECK(cudaStreamDestroy(stream));
+  }
+
+  __host__ void Launch() {
+    void* args[] = {&dst, &src};
+    // Base on the document, when the CUDA kernel utilize NVSHMEM synchronization,
+    // nvshmemx_collective_launch must be used.
+    // ref: https://docs.nvidia.com/nvshmem/archives/nvshmem-203/api/docs/api/launch.html?highlight=nvshmemx_collective_launch
+    NVSHMEM_CHECK(nvshmemx_collective_launch((const void*)ring, 1, 1, args, 0, stream));
+    nvshmemx_barrier_all_on_stream(stream);
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    // copy data from GPU to CPU
+    int msg;
+    CUDA_CHECK(cudaMemcpyAsync(&msg, dst, sizeof(int), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    std::cout << nvshmem.mype << " recv: " << msg << std::endl;
+  }
+};
+
+int main(int argc, char* argv[]) {
+  auto runner = NVSHMEMRun(argc, argv);
+  runner.Launch();
 }
