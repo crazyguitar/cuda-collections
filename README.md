@@ -8,6 +8,7 @@
 * [nvshmem-put](src/nvshmem-put)
 * [nvshmem-put-nbi](src/nvshmem-put-nbi)
 * [nvshmem-put-nbi-block](src/nvshmem-put-nbi-block)
+* [nvshmem-put-nbi-warp](src/nvshmem-put-nbi-warp)
 * [nvshmem-collective-launch](src/nvshmem-collective-launch)
 
 ```
