@@ -10,6 +10,7 @@
 * [nvshmem-put-nbi-block](src/nvshmem-put-nbi-block)
 * [nvshmem-put-nbi-warp](src/nvshmem-put-nbi-warp)
 * [nvshmem-collective-launch](src/nvshmem-collective-launch)
+* [nccl-symmetric-memory ](src/nccl-symmetric-memory)
 
 ```
 # build an enroot sqush file
