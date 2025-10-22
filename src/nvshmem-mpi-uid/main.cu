@@ -44,12 +44,14 @@ struct NVSHMEM {
     MPI_CHECK(MPI_Comm_rank(MPI_COMM_WORLD, &world_rank));
     MPI_CHECK(MPI_Comm_size(MPI_COMM_WORLD, &world_size));
     MPI_CHECK(MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, world_rank, MPI_INFO_NULL, &local_comm));
+    MPI_CHECK(MPI_Comm_rank(local_comm, &local_rank));
+    MPI_CHECK(MPI_Comm_size(local_comm, &local_size));
     MPI_CHECK(MPI_Comm_free(&local_comm));
     CUDA_CHECK(cudaSetDevice(local_rank));
 
     nvshmemx_uniqueid_t id = NVSHMEMX_UNIQUEID_INITIALIZER;
     if (world_rank == 0) nvshmemx_get_uniqueid(&id);
-    MPI_Bcast(&id, sizeof(nvshmemx_uniqueid_t), MPI_UINT8_T, 0, MPI_COMM_WORLD);
+    MPI_CHECK(MPI_Bcast(&id, sizeof(nvshmemx_uniqueid_t), MPI_UINT8_T, 0, MPI_COMM_WORLD));
 
     nvshmemx_set_attr_uniqueid_args(world_rank, world_size, &id, &attr);
     nvshmemx_init_attr(NVSHMEMX_INIT_WITH_UNIQUEID, &attr);

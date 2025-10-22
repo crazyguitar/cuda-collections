@@ -44,6 +44,8 @@ struct NVSHMEM {
     MPI_CHECK(MPI_Comm_rank(MPI_COMM_WORLD, &world_rank));
     MPI_CHECK(MPI_Comm_size(MPI_COMM_WORLD, &world_size));
     MPI_CHECK(MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, world_rank, MPI_INFO_NULL, &local_comm));
+    MPI_CHECK(MPI_Comm_rank(local_comm, &local_rank));
+    MPI_CHECK(MPI_Comm_size(local_comm, &local_size));
     MPI_CHECK(MPI_Comm_free(&local_comm));
     CUDA_CHECK(cudaSetDevice(local_rank));
 

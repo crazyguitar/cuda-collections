@@ -54,6 +54,7 @@ struct NVSHMEM {
     MPI_CHECK(MPI_Comm_size(MPI_COMM_WORLD, &world_size));
     MPI_CHECK(MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, world_rank, MPI_INFO_NULL, &local_comm));
     MPI_CHECK(MPI_Comm_rank(local_comm, &local_rank));
+    MPI_CHECK(MPI_Comm_size(local_comm, &local_size));
     MPI_CHECK(MPI_Comm_free(&local_comm));
     CUDA_CHECK(cudaSetDevice(local_rank));
 
@@ -84,7 +85,6 @@ __global__ void ring(int* dst, int* src, const int n) {
   int npes = nvshmem_n_pes();
   int peer = (mype + 1) % npes;
   // Note that warpSize is predefined variable in CUDA kernel
-  int nwarps = blockDim.x / warpSize;
   src[idx] = mype;
   for (int widx = 0; widx < n; widx += warpSize) {
     int size = min(warpSize, n - widx);
