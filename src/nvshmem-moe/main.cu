@@ -28,6 +28,13 @@
     }                                                                                                       \
   } while (0)
 
+#define DEBUG(mype, ...) \
+  do {                   \
+    if (mype == 0) {     \
+      __VA_ARGS__        \
+    }                    \
+  } while (0)
+
 struct NVSHMEM {
   constexpr static size_t BUFSIZE = 256;
 
@@ -52,15 +59,23 @@ struct NVSHMEM {
   }
 };
 
+__global__ void Init(float* p, int base, int hidden_dim) {
+  int row = blockIdx.x;
+  assert(hidden_dim >= blockDim.x);
+  for (int col = threadIdx.x; col < hidden_dim; col += hidden_dim / blockDim.x) {
+    p[row * hidden_dim + col] = row + base * 128 + (float)col / hidden_dim;
+  }
+}
+
 struct MoE {
   constexpr static int k = 2;
   constexpr static int experts = 16;
   constexpr static int hidden_dim = 4096;
   constexpr static int batch_size = 2;
   constexpr static int sequence_len = 192;
-  constexpr static int tokens = batch_size * sequence_len;
-  constexpr static int num_rows = tokens * k;
-  constexpr static int num_elems = num_rows * hidden_dim;
+  constexpr static int total_tokens = batch_size * sequence_len;
+  constexpr static int total_rows = total_tokens * k;
+  constexpr static int num_elems = total_rows * hidden_dim;
   constexpr static int capacity = 2;
 
   int* d_expanded_src_row;
@@ -74,29 +89,30 @@ struct MoE {
 
   __host__ MoE() {
     auto npes = nvshmem.npes;
-    CUDA_CHECK(cudaMalloc(&d_expert_pos, sizeof(int) * npes * experts * num_rows));
-    CUDA_CHECK(cudaMalloc(&d_expanded_src_row, sizeof(int) * num_rows));
-    CUDA_CHECK(cudaMalloc(&d_expert_for_expanded_src_row, sizeof(int) * num_rows));
-    d_expert_count = static_cast<int*>(nvshmem_malloc(sizeof(int) * experts * num_rows));
+    CUDA_CHECK(cudaMalloc(&d_expert_pos, sizeof(int) * npes * experts * total_rows));
+    CUDA_CHECK(cudaMalloc(&d_expanded_src_row, sizeof(int) * total_rows));
+    CUDA_CHECK(cudaMalloc(&d_expert_for_expanded_src_row, sizeof(int) * total_rows));
+    d_expert_count = static_cast<int*>(nvshmem_malloc(sizeof(int) * experts * total_rows));
     d_expert_offset = static_cast<int*>(nvshmem_malloc(sizeof(int) * experts));
-    d_sendbuf = static_cast<float*>(nvshmem_malloc(sizeof(float) * tokens * hidden_dim));
-    d_recvbuf = static_cast<float*>(nvshmem_malloc(sizeof(float) * num_rows * hidden_dim * capacity));
+    d_sendbuf = static_cast<float*>(nvshmem_malloc(sizeof(float) * total_tokens * hidden_dim));
+    d_recvbuf = static_cast<float*>(nvshmem_malloc(sizeof(float) * total_rows * hidden_dim * capacity));
+    Init<<<total_tokens, hidden_dim>>>(d_sendbuf, nvshmem.mype, hidden_dim);
     Permute();
   }
 
   __host__ __forceinline__ void Permute() {
-    std::vector<std::pair<int, int>> expert_map(num_rows);
+    std::vector<std::pair<int, int>> expert_map(total_rows);
     std::vector<int> expert_count(experts);
     std::vector<int> expert_offset(experts);
-    std::vector<int> expanded_src_row(num_rows);
-    std::vector<int> expert_for_expanded_src_row(num_rows);
+    std::vector<int> expanded_src_row(total_rows);
+    std::vector<int> expert_for_expanded_src_row(total_rows);
     int cur_expert = 0;
 
     for (int i = 0; i < expert_map.size() / 2; ++i) {
       for (int j = 0; j < k; ++j) {
         auto selected = cur_expert % experts;
         ++cur_expert;
-        expert_map[i + j * tokens] = {selected, i + j * tokens};
+        expert_map[i + j * total_tokens] = {selected, i + j * total_tokens};
         ++expert_count[selected];
       }
     }
@@ -114,14 +130,14 @@ struct MoE {
     }
 
     auto p = d_expert_count;
-    for (int i = 0; i < num_rows; ++i) {
+    for (int i = 0; i < total_rows; ++i) {
       CUDA_CHECK(cudaMemcpy(p, expert_count.data(), experts * sizeof(int), cudaMemcpyHostToDevice));
       p += experts;
     }
 
     CUDA_CHECK(cudaMemcpy(d_expert_offset, expert_offset.data(), experts * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_expanded_src_row, expanded_src_row.data(), num_rows * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_expert_for_expanded_src_row, expert_for_expanded_src_row.data(), num_rows * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_expanded_src_row, expanded_src_row.data(), total_rows * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_expert_for_expanded_src_row, expert_for_expanded_src_row.data(), total_rows * sizeof(int), cudaMemcpyHostToDevice));
   }
 
   __host__ ~MoE() {
