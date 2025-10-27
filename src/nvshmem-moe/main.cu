@@ -28,6 +28,15 @@
     }                                                                                                       \
   } while (0)
 
+#define KERNEL_CHECK(msg)                                                                                   \
+  do {                                                                                                      \
+    cudaError_t err = cudaGetLastError();                                                                   \
+    if (err != cudaSuccess) {                                                                               \
+      fprintf(stderr, "[%s:%d] %s got CUDA error: %s\n", __FILE__, __LINE__, msg, cudaGetErrorString(err)); \
+      exit(1);                                                                                              \
+    }                                                                                                       \
+  } while (0)
+
 #define DEBUG(mype, ...) \
   do {                   \
     if (mype == 0) {     \
@@ -59,10 +68,9 @@ struct NVSHMEM {
   }
 };
 
-__global__ void Init(float* p, int base, int hidden_dim) {
+__global__ void init(float* p, int base, int hidden_dim) {
   int row = blockIdx.x;
-  assert(hidden_dim >= blockDim.x);
-  for (int col = threadIdx.x; col < hidden_dim; col += hidden_dim / blockDim.x) {
+  for (int col = threadIdx.x; col < hidden_dim; col += blockDim.x) {
     p[row * hidden_dim + col] = row + base * 128 + (float)col / hidden_dim;
   }
 }
@@ -86,18 +94,35 @@ struct MoE {
   float* d_sendbuf;
   float* d_recvbuf;
   NVSHMEM nvshmem;
+  cudaStream_t stream;
 
   __host__ MoE() {
     auto npes = nvshmem.npes;
     CUDA_CHECK(cudaMalloc(&d_expert_pos, sizeof(int) * npes * experts * total_rows));
     CUDA_CHECK(cudaMalloc(&d_expanded_src_row, sizeof(int) * total_rows));
     CUDA_CHECK(cudaMalloc(&d_expert_for_expanded_src_row, sizeof(int) * total_rows));
+    CUDA_CHECK(cudaStreamCreate(&stream));
     d_expert_count = static_cast<int*>(nvshmem_malloc(sizeof(int) * experts * total_rows));
     d_expert_offset = static_cast<int*>(nvshmem_malloc(sizeof(int) * experts));
     d_sendbuf = static_cast<float*>(nvshmem_malloc(sizeof(float) * total_tokens * hidden_dim));
     d_recvbuf = static_cast<float*>(nvshmem_malloc(sizeof(float) * total_rows * hidden_dim * capacity));
-    Init<<<total_tokens, hidden_dim>>>(d_sendbuf, nvshmem.mype, hidden_dim);
+
+    // CUDA has a maximum of 1024 threads per block.
+    init<<<total_tokens, 1024, 0, stream>>>(d_sendbuf, nvshmem.mype, hidden_dim);
+    KERNEL_CHECK("init d_sendbuf fail");
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     Permute();
+  }
+
+  __host__ ~MoE() {
+    CUDA_CHECK(cudaFree(d_expanded_src_row));
+    CUDA_CHECK(cudaFree(d_expert_for_expanded_src_row));
+    CUDA_CHECK(cudaFree(d_expert_pos));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    nvshmem_free(d_expert_count);
+    nvshmem_free(d_expert_offset);
+    nvshmem_free(d_sendbuf);
+    nvshmem_free(d_recvbuf);
   }
 
   __host__ __forceinline__ void Permute() {
@@ -138,16 +163,6 @@ struct MoE {
     CUDA_CHECK(cudaMemcpy(d_expert_offset, expert_offset.data(), experts * sizeof(int), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_expanded_src_row, expanded_src_row.data(), total_rows * sizeof(int), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_expert_for_expanded_src_row, expert_for_expanded_src_row.data(), total_rows * sizeof(int), cudaMemcpyHostToDevice));
-  }
-
-  __host__ ~MoE() {
-    CUDA_CHECK(cudaFree(d_expanded_src_row));
-    CUDA_CHECK(cudaFree(d_expert_for_expanded_src_row));
-    CUDA_CHECK(cudaFree(d_expert_pos));
-    nvshmem_free(d_expert_count);
-    nvshmem_free(d_expert_offset);
-    nvshmem_free(d_sendbuf);
-    nvshmem_free(d_recvbuf);
   }
 
   friend std::ostream& operator<<(std::ostream& os, const MoE& moe) { return os << moe.nvshmem; }
