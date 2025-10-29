@@ -1,5 +1,6 @@
 add_subdirectory(hello)
 add_subdirectory(sum)
+add_subdirectory(warp)
 add_subdirectory(__shfl)
 add_subdirectory(nvshmem-hello)
 add_subdirectory(nvshmem-mpi)
