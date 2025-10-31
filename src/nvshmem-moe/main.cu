@@ -1,3 +1,5 @@
+#include <cuda.h>
+#include <curand_kernel.h>
 #include <errno.h>
 #include <nvshmem.h>
 #include <nvshmemx.h>
@@ -28,21 +30,14 @@
     }                                                                                                       \
   } while (0)
 
-#define KERNEL_CHECK(msg)                                                                                   \
-  do {                                                                                                      \
-    cudaError_t err = cudaGetLastError();                                                                   \
-    if (err != cudaSuccess) {                                                                               \
-      fprintf(stderr, "[%s:%d] %s got CUDA error: %s\n", __FILE__, __LINE__, msg, cudaGetErrorString(err)); \
-      exit(1);                                                                                              \
-    }                                                                                                       \
-  } while (0)
-
 #define DEBUG(mype, ...) \
   do {                   \
     if (mype == 0) {     \
       __VA_ARGS__        \
     }                    \
   } while (0)
+
+#define LAUNCH_KERNEL(cfg, kernel, ...) CUDA_CHECK(cudaLaunchKernelEx(cfg, kernel, ##__VA_ARGS__))
 
 struct NVSHMEM {
   constexpr static size_t BUFSIZE = 256;
@@ -64,111 +59,118 @@ struct NVSHMEM {
   ~NVSHMEM() { nvshmem_finalize(); }
 
   friend std::ostream& operator<<(std::ostream& os, const NVSHMEM& nvshmem) {
-    return os << "[" << nvshmem.hostname << "] mype: " << nvshmem.mype << " npes: " << nvshmem.npes << " mype_node: " << nvshmem.mype_node;
+    const auto& hostname = nvshmem.hostname;
+    const auto& mype = nvshmem.mype;
+    const auto& npes = nvshmem.npes;
+    const auto& mype_node = nvshmem.mype_node;
+    return os << "[" << hostname << "] mype: " << mype << " npes: " << npes << " mype_node: " << mype_node;
   }
 };
 
-__global__ void init(float* p, int base, int hidden_dim) {
-  int row = blockIdx.x;
-  for (int col = threadIdx.x; col < hidden_dim; col += blockDim.x) {
-    p[row * hidden_dim + col] = row + base * 128 + (float)col / hidden_dim;
+struct Indexer {
+  int thread_idx;
+  int block_idx;
+  int block_dim;
+  int warp_idx;
+  int warp_dim;
+  int lane_idx;
+
+  Indexer() = delete;
+  __device__ Indexer(int thread_idx, int block_idx, int block_dim, int warp_dim)
+      : thread_idx{thread_idx}, block_idx{block_idx}, block_dim{block_dim}, warp_dim{warp_dim} {
+    warp_idx = thread_idx / warp_dim;
+    asm volatile("mov.u32  %0,  %%laneid;" : "=r"(lane_idx));
+  }
+};
+
+struct TokenIndexer : public Indexer {
+  int global_token_idx;
+
+  TokenIndexer() = delete;
+  __device__ TokenIndexer(int thread_idx, int block_idx, int block_dim, int warp_dim) : Indexer{thread_idx, block_idx, block_dim, warp_dim} {
+    global_token_idx = thread_idx + block_dim * block_idx;
+  }
+};
+
+__device__ void InitIndices(curandState& state, const TokenIndexer& indexer, int* d_indices, const int num_experts) {
+  auto token_idx = indexer.global_token_idx;
+  d_indices[token_idx] = curand(&state) % num_experts;
+}
+
+__device__ void InitTokens(curandState& state, const TokenIndexer& indexer, float* d_x, const int tokens, const int input_dim) {
+  auto token_idx = indexer.global_token_idx;
+#pragma unroll
+  for (int i = 0; i < input_dim; ++i) {
+    int elem_idx = i + token_idx * input_dim;
+    d_x[elem_idx] = curand_uniform(&state);
   }
 }
 
-struct MoE {
-  constexpr static int k = 2;
-  constexpr static int experts = 16;
-  constexpr static int hidden_dim = 4096;
-  constexpr static int batch_size = 2;
-  constexpr static int sequence_len = 192;
-  constexpr static int total_tokens = batch_size * sequence_len;
-  constexpr static int total_rows = total_tokens * k;
-  constexpr static int num_elems = total_rows * hidden_dim;
-  constexpr static int capacity = 2;
+// TODO
+__device__ void Dispatch(float* d_x) {}
 
-  int* d_expanded_src_row;
-  int* d_expert_for_expanded_src_row;
-  int* d_expert_pos;
-  int* d_expert_count;
-  int* d_expert_offset;
-  float* d_sendbuf;
-  float* d_recvbuf;
+// TODO
+__device__ void Combine(float* d_y) {}
+
+__global__ void
+Forward(float* d_x, float* d_y, int* d_indices, int seed, int tokens, int input_dim, int output_dim, int num_experts, int num_local_experts) {
+  const auto idx = threadIdx.x + blockDim.x * blockIdx.x;
+  if (idx >= tokens) return;
+  const auto indexer = TokenIndexer(threadIdx.x, blockIdx.x, blockDim.x, warpSize);
+  curandState rand_state;
+  curand_init(seed, idx, 0, &rand_state);
+  InitIndices(rand_state, indexer, d_indices, num_experts);
+  InitTokens(rand_state, indexer, d_x, tokens, input_dim);
+}
+
+struct MoE {
+  constexpr static int batch_size = 4;
+  constexpr static int sequence_len = 1024;
+  constexpr static int input_dim = 512;
+  constexpr static int output_dim = 512;
+  constexpr static int num_local_experts = 2;
+  constexpr static int k = 2;
+  constexpr static int seed = 123;
   NVSHMEM nvshmem;
+  cudaDeviceProp prop;
   cudaStream_t stream;
 
-  __host__ MoE() {
-    auto npes = nvshmem.npes;
-    CUDA_CHECK(cudaMalloc(&d_expert_pos, sizeof(int) * npes * experts * total_rows));
-    CUDA_CHECK(cudaMalloc(&d_expanded_src_row, sizeof(int) * total_rows));
-    CUDA_CHECK(cudaMalloc(&d_expert_for_expanded_src_row, sizeof(int) * total_rows));
-    CUDA_CHECK(cudaStreamCreate(&stream));
-    d_expert_count = static_cast<int*>(nvshmem_malloc(sizeof(int) * experts * total_rows));
-    d_expert_offset = static_cast<int*>(nvshmem_malloc(sizeof(int) * experts));
-    d_sendbuf = static_cast<float*>(nvshmem_malloc(sizeof(float) * total_tokens * hidden_dim));
-    d_recvbuf = static_cast<float*>(nvshmem_malloc(sizeof(float) * total_rows * hidden_dim * capacity));
+  /* MoE attr */
+  int tokens;
+  int num_experts;
+  int* d_indices;
+  float* d_x;
+  float* d_y;
 
-    // CUDA has a maximum of 1024 threads per block.
-    init<<<total_tokens, 1024, 0, stream>>>(d_sendbuf, nvshmem.mype, hidden_dim);
-    KERNEL_CHECK("init d_sendbuf fail");
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    Permute();
+  __host__ MoE() {
+    tokens = batch_size * sequence_len;
+    num_experts = num_local_experts * nvshmem.npes;
+    CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
+    CUDA_CHECK(cudaStreamCreate(&stream));
+    CUDA_CHECK(cudaMalloc(&d_indices, sizeof(int) * tokens * k));
+    d_x = static_cast<float*>(nvshmem_malloc(sizeof(float) * tokens * input_dim));
+    d_y = static_cast<float*>(nvshmem_malloc(sizeof(float) * tokens * output_dim));
   }
 
   __host__ ~MoE() {
-    CUDA_CHECK(cudaFree(d_expanded_src_row));
-    CUDA_CHECK(cudaFree(d_expert_for_expanded_src_row));
-    CUDA_CHECK(cudaFree(d_expert_pos));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    nvshmem_free(d_expert_count);
-    nvshmem_free(d_expert_offset);
-    nvshmem_free(d_sendbuf);
-    nvshmem_free(d_recvbuf);
+    nvshmem_free(d_x);
+    nvshmem_free(d_y);
+    CUDA_CHECK(cudaFree(d_indices));
+    CUDA_CHECK(cudaStreamDestroy(stream));
   }
 
-  __host__ __forceinline__ void Permute() {
-    std::vector<std::pair<int, int>> expert_map(total_rows);
-    std::vector<int> expert_count(experts);
-    std::vector<int> expert_offset(experts);
-    std::vector<int> expanded_src_row(total_rows);
-    std::vector<int> expert_for_expanded_src_row(total_rows);
-    int cur_expert = 0;
-
-    for (int i = 0; i < expert_map.size() / 2; ++i) {
-      for (int j = 0; j < k; ++j) {
-        auto selected = cur_expert % experts;
-        ++cur_expert;
-        expert_map[i + j * total_tokens] = {selected, i + j * total_tokens};
-        ++expert_count[selected];
-      }
-    }
-
-    int prev = 0;
-    for (int i = 0; i < experts; ++i) {
-      prev += expert_count[i];
-      expert_offset[i] = prev;
-    }
-
-    std::sort(expert_map.begin(), expert_map.end());
-    for (int i = 0; i < expert_map.size(); ++i) {
-      expanded_src_row[i] = expert_map[i].first;
-      expert_for_expanded_src_row[i] = expert_map[i].second;
-    }
-
-    auto p = d_expert_count;
-    for (int i = 0; i < total_rows; ++i) {
-      CUDA_CHECK(cudaMemcpy(p, expert_count.data(), experts * sizeof(int), cudaMemcpyHostToDevice));
-      p += experts;
-    }
-
-    CUDA_CHECK(cudaMemcpy(d_expert_offset, expert_offset.data(), experts * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_expanded_src_row, expanded_src_row.data(), total_rows * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_expert_for_expanded_src_row, expert_for_expanded_src_row.data(), total_rows * sizeof(int), cudaMemcpyHostToDevice));
+  __host__ void Run() {
+    cudaLaunchConfig_t cfg{0};
+    int block_dim = std::min(tokens, prop.maxThreadsPerBlock);
+    int grid_dim = (tokens + block_dim - 1) / block_dim;
+    cfg.gridDim = dim3(grid_dim, 1, 1);
+    cfg.blockDim = dim3(block_dim, 1, 1);
+    cfg.stream = stream;
+    LAUNCH_KERNEL(&cfg, Forward, d_x, d_y, d_indices, seed, tokens, input_dim, output_dim, num_experts, num_local_experts);
   }
-
-  friend std::ostream& operator<<(std::ostream& os, const MoE& moe) { return os << moe.nvshmem; }
 };
 
 int main(int argc, char* argv[]) {
   auto moe = MoE();
-  std::cout << moe << std::endl;
+  moe.Run();
 }
