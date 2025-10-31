@@ -2,6 +2,8 @@
 
 * [hello](src/hello)
 * [sum](src/sum)
+* [warp](src/warp)
+* [\_\_shfl](src/__shfl)
 * [nvshmem-hello](src/nvshmem-hello)
 * [nvshmem-mpi](src/nvshmem-mpi)
 * [nvshmem-mpi-uid](src/nvshmem-mpi-uid)
