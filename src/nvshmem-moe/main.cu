@@ -30,13 +30,6 @@
     }                                                                                                       \
   } while (0)
 
-#define DEBUG(mype, ...) \
-  do {                   \
-    if (mype == 0) {     \
-      __VA_ARGS__        \
-    }                    \
-  } while (0)
-
 #define LAUNCH_KERNEL(cfg, kernel, ...) CUDA_CHECK(cudaLaunchKernelEx(cfg, kernel, ##__VA_ARGS__))
 
 struct NVSHMEM {
@@ -92,12 +85,12 @@ struct TokenIndexer : public Indexer {
   }
 };
 
-__device__ void InitIndices(curandState& state, const TokenIndexer& indexer, int* d_indices, const int num_experts) {
+__device__ __forceinline__ void InitIndices(curandState& state, const TokenIndexer& indexer, int* d_indices, const int num_experts) {
   auto token_idx = indexer.global_token_idx;
   d_indices[token_idx] = curand(&state) % num_experts;
 }
 
-__device__ void InitTokens(curandState& state, const TokenIndexer& indexer, float* d_x, const int tokens, const int input_dim) {
+__device__ __forceinline__ void InitTokens(curandState& state, const TokenIndexer& indexer, float* d_x, const int tokens, const int input_dim) {
   auto token_idx = indexer.global_token_idx;
 #pragma unroll
   for (int i = 0; i < input_dim; ++i) {
@@ -112,8 +105,20 @@ __device__ void Dispatch(float* d_x) {}
 // TODO
 __device__ void Combine(float* d_y) {}
 
-__global__ void
-Forward(float* d_x, float* d_y, int* d_indices, int seed, int tokens, int input_dim, int output_dim, int num_experts, int num_local_experts) {
+__global__ void Forward(
+    float* d_x,
+    float* d_y,
+    int* d_indices,
+    int* d_expert_counts,
+    int seed,
+    int tokens,
+    int input_dim,
+    int output_dim,
+    int num_experts,
+    int num_local_experts,
+    int mype,
+    int npes
+) {
   const auto idx = threadIdx.x + blockDim.x * blockIdx.x;
   if (idx >= tokens) return;
   const auto indexer = TokenIndexer(threadIdx.x, blockIdx.x, blockDim.x, warpSize);
@@ -121,6 +126,7 @@ Forward(float* d_x, float* d_y, int* d_indices, int seed, int tokens, int input_
   curand_init(seed, idx, 0, &rand_state);
   InitIndices(rand_state, indexer, d_indices, num_experts);
   InitTokens(rand_state, indexer, d_x, tokens, input_dim);
+  // TODO count
 }
 
 struct MoE {
@@ -139,10 +145,12 @@ struct MoE {
   int tokens;
   int num_experts;
   int* d_indices;
+  int* d_expert_counts;
   float* d_x;
   float* d_y;
 
   __host__ MoE() {
+    auto npes = nvshmem.npes;
     tokens = batch_size * sequence_len;
     num_experts = num_local_experts * nvshmem.npes;
     CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
@@ -150,23 +158,29 @@ struct MoE {
     CUDA_CHECK(cudaMalloc(&d_indices, sizeof(int) * tokens * k));
     d_x = static_cast<float*>(nvshmem_malloc(sizeof(float) * tokens * input_dim));
     d_y = static_cast<float*>(nvshmem_malloc(sizeof(float) * tokens * output_dim));
+    d_expert_counts = static_cast<int*>(nvshmem_malloc(sizeof(int) * npes * num_experts));
   }
 
   __host__ ~MoE() {
     nvshmem_free(d_x);
     nvshmem_free(d_y);
+    nvshmem_free(d_expert_counts);
     CUDA_CHECK(cudaFree(d_indices));
     CUDA_CHECK(cudaStreamDestroy(stream));
   }
 
   __host__ void Run() {
+    auto mype = nvshmem.mype;
+    auto npes = nvshmem.npes;
     cudaLaunchConfig_t cfg{0};
     int block_dim = std::min(tokens, prop.maxThreadsPerBlock);
     int grid_dim = (tokens + block_dim - 1) / block_dim;
     cfg.gridDim = dim3(grid_dim, 1, 1);
     cfg.blockDim = dim3(block_dim, 1, 1);
     cfg.stream = stream;
-    LAUNCH_KERNEL(&cfg, Forward, d_x, d_y, d_indices, seed, tokens, input_dim, output_dim, num_experts, num_local_experts);
+    LAUNCH_KERNEL(
+        &cfg, Forward, d_x, d_y, d_indices, d_expert_counts, seed, tokens, input_dim, output_dim, num_experts, num_local_experts, mype, npes
+    );
   }
 };
 
