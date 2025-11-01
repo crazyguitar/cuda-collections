@@ -80,11 +80,33 @@ __device__ __forceinline__ void InitTokens(curandState& state, float* d_x, int t
   }
 }
 
-__device__ void Count(int* d_expert_counts, int* d_indices, int mype) {}
-__device__ void Dispatch(float* d_x) {}
-__device__ void Combine(float* d_y) {}
+__device__ __forceinline__ void Count(int* d_expert_counts, int* d_indices, int tokens, int k, int num_experts, int mype) {
+  for (int i = threadIdx.x; i < tokens; i += blockDim.x) {
+#pragma unroll
+    for (int j = 0; j < k; ++j) {
+      int expert_idx = d_indices[j + i * k];
+      atomicAdd(&d_expert_counts[expert_idx + num_experts * mype], 1);
+    }
+  }
+  __syncthreads();
+}
 
-__global__ void Forward(
+__device__ __forceinline__ void Dispatch(float* d_x) {}
+__device__ __forceinline__ void Forward(float* d_x, float* d_y, int tokens, int input_dim, int output_dim) {
+  // This function only coypies d_x to d_y w/o doing actually MLP forward.
+  assert(input_dim == output_dim);
+  for (int i = threadIdx.x; i < tokens; i += blockDim.x) {
+#pragma unroll
+    for (int j = 0; j < input_dim; ++j) {
+      d_y[j + i * input_dim] = d_x[j + i * input_dim];
+    }
+  }
+  __syncthreads();
+}
+
+__device__ __forceinline__ void Combine(float* d_y) {}
+
+__global__ void MoEKernel(
     float* d_x,
     float* d_y,
     int* d_indices,
@@ -104,6 +126,12 @@ __global__ void Forward(
   curand_init(seed, idx, 0, &rand_state);
   InitIndices(rand_state, d_indices, k, tokens, num_experts);
   InitTokens(rand_state, d_x, tokens, input_dim);
+  __syncthreads();
+
+  Count(d_expert_counts, d_indices, tokens, k, num_experts, mype);
+  Dispatch(d_x);
+  Forward(d_x, d_y, tokens, input_dim, output_dim);
+  Combine(d_y);
 }
 
 struct MoE {
@@ -156,7 +184,7 @@ struct MoE {
     cfg.blockDim = dim3(block_dim, 1, 1);
     cfg.stream = stream;
     LAUNCH_KERNEL(
-        &cfg, Forward, d_x, d_y, d_indices, d_expert_counts, seed, k, tokens, input_dim, output_dim, num_experts, num_local_experts, mype, npes
+        &cfg, MoEKernel, d_x, d_y, d_indices, d_expert_counts, seed, k, tokens, input_dim, output_dim, num_experts, num_local_experts, mype, npes
     );
   }
 };
