@@ -73,8 +73,8 @@ struct NVSHMEM {
   }
 
   friend std::ostream& operator<<(std::ostream& os, NVSHMEM& nvshmem) {
-    os << "world_size: " << nvshmem.world_size << " world_rank: " << nvshmem.world_rank << " mype: " << nvshmem.mype << " npes: " << nvshmem.npes
-       << " mype_node: " << nvshmem.mype_node;
+    os << "world_size: " << nvshmem.world_size << " world_rank: " << nvshmem.world_rank << " mype: " << nvshmem.mype
+       << " npes: " << nvshmem.npes << " mype_node: " << nvshmem.mype_node;
     return os;
   }
 };
@@ -116,7 +116,8 @@ struct NVSHMEMRun {
     void* args[] = {&dst, &src};
     // Base on the document, when the CUDA kernel utilize NVSHMEM synchronization,
     // nvshmemx_collective_launch must be used.
-    // ref: https://docs.nvidia.com/nvshmem/archives/nvshmem-203/api/docs/api/launch.html?highlight=nvshmemx_collective_launch
+    // ref:
+    // https://docs.nvidia.com/nvshmem/archives/nvshmem-203/api/docs/api/launch.html?highlight=nvshmemx_collective_launch
     NVSHMEM_CHECK(nvshmemx_collective_launch((const void*)ring, 1, 1, args, 0, stream));
     nvshmemx_barrier_all_on_stream(stream);
     CUDA_CHECK(cudaStreamSynchronize(stream));
