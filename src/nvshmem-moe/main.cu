@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cassert>
 #include <cstdio>
 #include <iostream>
 #include <utility>
@@ -60,49 +61,27 @@ struct NVSHMEM {
   }
 };
 
-struct Indexer {
-  int thread_idx;
-  int block_idx;
-  int block_dim;
-  int warp_idx;
-  int warp_dim;
-  int lane_idx;
-
-  Indexer() = delete;
-  __device__ Indexer(int thread_idx, int block_idx, int block_dim, int warp_dim)
-      : thread_idx{thread_idx}, block_idx{block_idx}, block_dim{block_dim}, warp_dim{warp_dim} {
-    warp_idx = thread_idx / warp_dim;
-    asm volatile("mov.u32  %0,  %%laneid;" : "=r"(lane_idx));
-  }
-};
-
-struct TokenIndexer : public Indexer {
-  int global_token_idx;
-
-  TokenIndexer() = delete;
-  __device__ TokenIndexer(int thread_idx, int block_idx, int block_dim, int warp_dim) : Indexer{thread_idx, block_idx, block_dim, warp_dim} {
-    global_token_idx = thread_idx + block_dim * block_idx;
-  }
-};
-
-__device__ __forceinline__ void InitIndices(curandState& state, const TokenIndexer& indexer, int* d_indices, const int num_experts) {
-  auto token_idx = indexer.global_token_idx;
-  d_indices[token_idx] = curand(&state) % num_experts;
-}
-
-__device__ __forceinline__ void InitTokens(curandState& state, const TokenIndexer& indexer, float* d_x, const int tokens, const int input_dim) {
-  auto token_idx = indexer.global_token_idx;
+__device__ __forceinline__ void InitIndices(curandState& state, int* d_indices, int k, int tokens, int num_experts) {
+  for (int i = threadIdx.x; i < tokens; i += blockDim.x) {
+    d_indices[i * k] = curand(&state) % num_experts;
 #pragma unroll
-  for (int i = 0; i < input_dim; ++i) {
-    int elem_idx = i + token_idx * input_dim;
-    d_x[elem_idx] = curand_uniform(&state);
+    for (int j = 1; j < k; ++j) {
+      d_indices[j + i * k] = (d_indices[i * k] + 1) % num_experts;
+    }
   }
 }
 
-// TODO
-__device__ void Dispatch(float* d_x) {}
+__device__ __forceinline__ void InitTokens(curandState& state, float* d_x, int tokens, int input_dim) {
+  for (int i = threadIdx.x; i < tokens; i += blockDim.x) {
+#pragma unroll
+    for (int j = 0; j < input_dim; ++j) {
+      d_x[j + i * input_dim] = curand_uniform(&state);
+    }
+  }
+}
 
-// TODO
+__device__ void Count(int* d_expert_counts, int* d_indices, int mype) {}
+__device__ void Dispatch(float* d_x) {}
 __device__ void Combine(float* d_y) {}
 
 __global__ void Forward(
@@ -111,6 +90,7 @@ __global__ void Forward(
     int* d_indices,
     int* d_expert_counts,
     int seed,
+    int k,
     int tokens,
     int input_dim,
     int output_dim,
@@ -120,13 +100,10 @@ __global__ void Forward(
     int npes
 ) {
   const auto idx = threadIdx.x + blockDim.x * blockIdx.x;
-  if (idx >= tokens) return;
-  const auto indexer = TokenIndexer(threadIdx.x, blockIdx.x, blockDim.x, warpSize);
   curandState rand_state;
   curand_init(seed, idx, 0, &rand_state);
-  InitIndices(rand_state, indexer, d_indices, num_experts);
-  InitTokens(rand_state, indexer, d_x, tokens, input_dim);
-  // TODO count
+  InitIndices(rand_state, d_indices, k, tokens, num_experts);
+  InitTokens(rand_state, d_x, tokens, input_dim);
 }
 
 struct MoE {
@@ -174,12 +151,12 @@ struct MoE {
     auto npes = nvshmem.npes;
     cudaLaunchConfig_t cfg{0};
     int block_dim = std::min(tokens, prop.maxThreadsPerBlock);
-    int grid_dim = (tokens + block_dim - 1) / block_dim;
+    int grid_dim = 1;  // use single sm
     cfg.gridDim = dim3(grid_dim, 1, 1);
     cfg.blockDim = dim3(block_dim, 1, 1);
     cfg.stream = stream;
     LAUNCH_KERNEL(
-        &cfg, Forward, d_x, d_y, d_indices, d_expert_counts, seed, tokens, input_dim, output_dim, num_experts, num_local_experts, mype, npes
+        &cfg, Forward, d_x, d_y, d_indices, d_expert_counts, seed, k, tokens, input_dim, output_dim, num_experts, num_local_experts, mype, npes
     );
   }
 };
