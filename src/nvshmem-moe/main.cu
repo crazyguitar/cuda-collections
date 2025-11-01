@@ -117,20 +117,32 @@ __device__ __forceinline__ void Count(
   __syncthreads();
 }
 
-__device__ __forceinline__ void Dispatch(float* d_x) {}
-__device__ __forceinline__ void Combine(float* d_y) {}
+__device__ __forceinline__ void Dispatch(
+    float* input_tokens,
+    float* send_tokens,
+    float* recv_tokens,
+    int* indices,
+    int* tokens_per_expert,
+    int mype,
+    int npes
+) {
+  float* local_tokens_per_expert = &tokens_per_expert[mype * num_experts];
+
+
+}
 
 __global__ void MoEKernel(
-    float* x,
-    float* y,
+    float* input_tokens,
+    float* send_tokens,
+    float* recv_tokens,
     int* indices,
     int* tokens_per_expert,
     int* tokens_per_pe,
     int seed,
     int k,
     int tokens,
+    int max_tokens,
     int input_dim,
-    int output_dim,
     int num_experts,
     int num_local_experts,
     int mype,
@@ -140,19 +152,17 @@ __global__ void MoEKernel(
   curandState rand_state;
   curand_init(seed, idx, 0, &rand_state);
   InitIndices(rand_state, indices, k, tokens, num_experts);
-  InitTokens(rand_state, x, tokens, input_dim);
+  InitTokens(rand_state, input_tokens, tokens, input_dim);
   __syncthreads();
 
   Count(indices, tokens_per_expert, tokens_per_pe, tokens, k, num_experts, num_local_experts, mype, npes);
-  Dispatch(x);
-  Combine(y);
+  Dispatch(input_tokens, send_tokens, recv_tokens, indices, tokens_per_expert, mype, npes);
 }
 
 struct MoE {
   constexpr static int batch_size = 4;
   constexpr static int sequence_len = 1024;
   constexpr static int input_dim = 512;
-  constexpr static int output_dim = 512;
   constexpr static int num_local_experts = 2;
   constexpr static int k = 2;
   constexpr static int seed = 123;
@@ -163,28 +173,33 @@ struct MoE {
   /* MoE attr */
   int tokens;
   int num_experts;
+  int max_tokens;
   int* d_indices;
   int* d_tokens_per_expert;
   int* d_tokens_per_pe;
-  float* d_x;
-  float* d_y;
+  float* d_input_tokens;
+  float* d_send_tokens;
+  float* d_recv_tokens;
 
   __host__ MoE() {
     auto npes = nvshmem.npes;
     tokens = batch_size * sequence_len;
+    max_tokens = npes * tokens;
     num_experts = num_local_experts * nvshmem.npes;
+
     CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
     CUDA_CHECK(cudaStreamCreate(&stream));
     CUDA_CHECK(cudaMalloc(&d_indices, sizeof(int) * tokens * k));
     CUDA_CHECK(cudaMalloc(&d_tokens_per_pe, sizeof(int) * npes));
-    d_x = static_cast<float*>(nvshmem_malloc(sizeof(float) * tokens * input_dim));
-    d_y = static_cast<float*>(nvshmem_malloc(sizeof(float) * tokens * output_dim));
+    CUDA_CHECK(cudaMalloc(&d_input_tokens, sizeof(int) * tokens * input_dim));
+    d_send_tokens = static_cast<float*>(nvshmem_malloc(sizeof(float) * k * tokens * input_dim));
+    d_recv_tokens = static_cast<float*>(nvshmem_malloc(sizeof(float) * npes * max_tokens * input_dim));
     d_tokens_per_expert = static_cast<int*>(nvshmem_malloc(sizeof(int) * npes * num_experts));
   }
 
   __host__ ~MoE() {
-    nvshmem_free(d_x);
-    nvshmem_free(d_y);
+    nvshmem_free(d_send_tokens);
+    nvshmem_free(d_recv_tokens);
     nvshmem_free(d_tokens_per_expert);
     CUDA_CHECK(cudaFree(d_tokens_per_pe));
     CUDA_CHECK(cudaFree(d_indices));
@@ -203,16 +218,17 @@ struct MoE {
     LAUNCH_KERNEL(
         &cfg,
         MoEKernel,
-        d_x,
-        d_y,
+        d_input_tokens,
+        d_send_tokens,
+        d_recv_tokens,
         d_indices,
         d_tokens_per_expert,
         d_tokens_per_pe,
         seed,
         k,
         tokens,
+        max_tokens,
         input_dim,
-        output_dim,
         num_experts,
         num_local_experts,
         mype,
