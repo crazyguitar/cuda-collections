@@ -117,18 +117,79 @@ __device__ __forceinline__ void Count(
   __syncthreads();
 }
 
+__device__ __forceinline__ void Permute(
+    float* input_tokens,
+    float* send_tokens,
+    int* indices,
+    int* tokens_per_expert,
+    int* shared_expert_offset,
+    int* shared_token_offset,
+    int k,
+    int tokens,
+    int input_dim,
+    int num_experts,
+    int mype
+) {
+  int* count = &tokens_per_expert[mype * num_experts];
+  if (threadIdx.x == 0) {
+    int prev = 0;
+    for (int i = 0; i < num_experts; ++i) {
+      prev += count[i];
+      shared_expert_offset[i] = prev;
+    }
+    for (int i = 0; i < tokens; ++i) {
+      for (int j = 0; j < k; ++j) {
+        auto expert = indices[i * k + j];
+        shared_token_offset[i * k + j] = shared_expert_offset[expert] - count[expert];
+        ++shared_expert_offset[expert];
+      }
+    }
+  }
+  __syncthreads();
+
+  for (int i = 0; i < tokens; ++i) {
+    float* token = &input_tokens[i * input_dim];
+    for (int j = 0; j < k; ++j) {
+      auto offset = shared_token_offset[i * k + j];
+      auto row = offset * input_dim;
+      for (int x = threadIdx.x; x < input_dim; x += blockDim.x) {
+        send_tokens[row + x] = token[x];
+      }
+    }
+  }
+  __syncthreads();
+}
+
 __device__ __forceinline__ void Dispatch(
     float* input_tokens,
     float* send_tokens,
     float* recv_tokens,
     int* indices,
     int* tokens_per_expert,
+    int* shared_expert_offset,
+    int* shared_token_offset,
+    int k,
+    int tokens,
+    int input_dim,
+    int num_experts,
     int mype,
     int npes
 ) {
-  float* local_tokens_per_expert = &tokens_per_expert[mype * num_experts];
+  Permute(
+      input_tokens,
+      send_tokens,
+      indices,
+      tokens_per_expert,
+      shared_expert_offset,
+      shared_token_offset,
+      k,
+      tokens,
+      input_dim,
+      num_experts,
+      mype
+  );
 
-
+  // TODO: dispatch
 }
 
 __global__ void MoEKernel(
@@ -141,13 +202,16 @@ __global__ void MoEKernel(
     int seed,
     int k,
     int tokens,
-    int max_tokens,
     int input_dim,
     int num_experts,
     int num_local_experts,
     int mype,
     int npes
 ) {
+  extern __shared__ char shared_buffer[];
+  int* shared_expert_offset = (int*)shared_buffer;
+  int* shared_token_offset = (int*)(shared_expert_offset + num_experts);
+
   const auto idx = threadIdx.x + blockDim.x * blockIdx.x;
   curandState rand_state;
   curand_init(seed, idx, 0, &rand_state);
@@ -156,7 +220,21 @@ __global__ void MoEKernel(
   __syncthreads();
 
   Count(indices, tokens_per_expert, tokens_per_pe, tokens, k, num_experts, num_local_experts, mype, npes);
-  Dispatch(input_tokens, send_tokens, recv_tokens, indices, tokens_per_expert, mype, npes);
+  Dispatch(
+      input_tokens,
+      send_tokens,
+      recv_tokens,
+      indices,
+      tokens_per_expert,
+      shared_expert_offset,
+      shared_token_offset,
+      k,
+      tokens,
+      input_dim,
+      num_experts,
+      mype,
+      npes
+  );
 }
 
 struct MoE {
@@ -207,6 +285,9 @@ struct MoE {
   }
 
   __host__ void Run() {
+    auto shared_expert_offset_size = sizeof(int) * num_experts;
+    auto shared_token_offset_size = sizeof(int) * tokens * k;
+
     auto mype = nvshmem.mype;
     auto npes = nvshmem.npes;
     cudaLaunchConfig_t cfg{0};
@@ -214,6 +295,7 @@ struct MoE {
     int grid_dim = 1;  // use single sm
     cfg.gridDim = dim3(grid_dim, 1, 1);
     cfg.blockDim = dim3(block_dim, 1, 1);
+    cfg.dynamicSmemBytes = shared_expert_offset_size + shared_token_offset_size;
     cfg.stream = stream;
     LAUNCH_KERNEL(
         &cfg,
@@ -227,7 +309,6 @@ struct MoE {
         seed,
         k,
         tokens,
-        max_tokens,
         input_dim,
         num_experts,
         num_local_experts,
