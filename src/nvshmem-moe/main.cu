@@ -61,6 +61,14 @@ struct NVSHMEM {
   }
 };
 
+/**
+ * @brief Initialize routing indices for tokens to experts using random assignment
+ * @param state Random state for generation
+ * @param indices Output array for expert indices
+ * @param k Number of experts per token
+ * @param tokens Number of tokens
+ * @param num_experts Total number of experts
+ */
 __device__ __forceinline__ void InitIndices(curandState& state, int* indices, int k, int tokens, int num_experts) {
   for (int i = threadIdx.x; i < tokens; i += blockDim.x) {
     indices[i * k] = curand(&state) % num_experts;
@@ -71,6 +79,13 @@ __device__ __forceinline__ void InitIndices(curandState& state, int* indices, in
   }
 }
 
+/**
+ * @brief Initialize input tokens with random values
+ * @param state Random state for generation
+ * @param x Output token array
+ * @param tokens Number of tokens
+ * @param input_dim Token dimension
+ */
 __device__ __forceinline__ void InitTokens(curandState& state, float* x, int tokens, int input_dim) {
   for (int i = threadIdx.x; i < tokens; i += blockDim.x) {
 #pragma unroll
@@ -80,6 +95,16 @@ __device__ __forceinline__ void InitTokens(curandState& state, float* x, int tok
   }
 }
 
+/**
+ * @brief Count tokens per expert and distribute counts across all PEs
+ * @param indices Expert assignment indices
+ * @param tokens_per_expert Output count array
+ * @param tokens Number of tokens
+ * @param k Number of experts per token
+ * @param num_experts Total number of experts
+ * @param mype Current PE ID
+ * @param npes Total number of PEs
+ */
 __device__ __forceinline__ void Count(int* indices, int* tokens_per_expert, int tokens, int k, int num_experts, int mype, int npes) {
   for (int i = threadIdx.x; i < tokens; i += blockDim.x) {
 #pragma unroll
@@ -98,6 +123,20 @@ __device__ __forceinline__ void Count(int* indices, int* tokens_per_expert, int 
   __syncthreads();
 }
 
+/**
+ * @brief Permute input tokens into send buffer based on expert assignments
+ * @param input_tokens Input token array
+ * @param send_tokens Output send buffer
+ * @param indices Expert assignment indices
+ * @param tokens_per_expert Token count per expert
+ * @param shared_expert_offset Shared memory for expert offsets
+ * @param shared_token_offset Shared memory for token offsets
+ * @param k Number of experts per token
+ * @param tokens Number of tokens
+ * @param input_dim Token dimension
+ * @param num_experts Total number of experts
+ * @param mype Current PE ID
+ */
 __device__ __forceinline__ void Permute(
     float* input_tokens,
     float* send_tokens,
@@ -141,6 +180,24 @@ __device__ __forceinline__ void Permute(
   __syncthreads();
 }
 
+/**
+ * @brief Dispatch tokens to appropriate experts across PEs using NVSHMEM
+ * @param input_tokens Input token array
+ * @param send_tokens Send buffer
+ * @param recv_tokens Receive buffer
+ * @param indices Expert assignment indices
+ * @param tokens_per_expert Token count per expert
+ * @param shared_expert_offset Shared memory for expert offsets
+ * @param shared_token_offset Shared memory for token offsets
+ * @param k Number of experts per token
+ * @param tokens Number of tokens
+ * @param input_dim Token dimension
+ * @param max_tokens Maximum tokens per expert
+ * @param num_experts Total number of experts
+ * @param num_local_experts Number of local experts
+ * @param mype Current PE ID
+ * @param npes Total number of PEs
+ */
 __device__ __forceinline__ void Dispatch(
     float* input_tokens,
     float* send_tokens,
@@ -192,6 +249,23 @@ __device__ __forceinline__ void Dispatch(
   }
 }
 
+/**
+ * @brief Main MoE kernel that handles token routing and expert dispatch
+ * @param input_tokens Input token array
+ * @param send_tokens Send buffer
+ * @param recv_tokens Receive buffer
+ * @param indices Expert assignment indices
+ * @param tokens_per_expert Token count per expert
+ * @param seed Random seed
+ * @param k Number of experts per token
+ * @param tokens Number of tokens
+ * @param input_dim Token dimension
+ * @param max_tokens Maximum tokens per expert
+ * @param num_experts Total number of experts
+ * @param num_local_experts Number of local experts
+ * @param mype Current PE ID
+ * @param npes Total number of PEs
+ */
 __global__ void MoEKernel(
     float* input_tokens,
     float* send_tokens,
@@ -260,6 +334,9 @@ struct MoE {
   float* d_send_tokens;
   float* d_recv_tokens;
 
+  /**
+   * @brief Initialize MoE system with memory allocation and NVSHMEM setup
+   */
   __host__ MoE() {
     auto npes = nvshmem.npes;
     tokens = batch_size * sequence_len;
@@ -275,6 +352,9 @@ struct MoE {
     d_tokens_per_expert = static_cast<int*>(nvshmem_malloc(sizeof(int) * npes * num_experts));
   }
 
+  /**
+   * @brief Clean up allocated memory and resources
+   */
   __host__ ~MoE() {
     nvshmem_free(d_send_tokens);
     nvshmem_free(d_recv_tokens);
@@ -283,6 +363,9 @@ struct MoE {
     CUDA_CHECK(cudaStreamDestroy(stream));
   }
 
+  /**
+   * @brief Execute MoE kernel with configured parameters
+   */
   __host__ void Run() {
     auto shared_expert_offset_size = sizeof(int) * num_experts;
     auto shared_token_offset_size = sizeof(int) * tokens * k;
