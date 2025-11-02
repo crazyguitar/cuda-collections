@@ -73,8 +73,8 @@ struct NVSHMEM {
   }
 
   friend std::ostream& operator<<(std::ostream& os, NVSHMEM& nvshmem) {
-    os << "world_size: " << nvshmem.world_size << " world_rank: " << nvshmem.world_rank << " mype: " << nvshmem.mype
-       << " npes: " << nvshmem.npes << " mype_node: " << nvshmem.mype_node;
+    os << "world_size: " << nvshmem.world_size << " world_rank: " << nvshmem.world_rank << " mype: " << nvshmem.mype << " npes: " << nvshmem.npes
+       << " mype_node: " << nvshmem.mype_node;
     return os;
   }
 };

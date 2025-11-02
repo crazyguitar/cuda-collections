@@ -80,8 +80,7 @@ __device__ __forceinline__ void InitTokens(curandState& state, float* x, int tok
   }
 }
 
-__device__ __forceinline__ void
-Count(int* indices, int* tokens_per_expert, int tokens, int k, int num_experts, int mype, int npes) {
+__device__ __forceinline__ void Count(int* indices, int* tokens_per_expert, int tokens, int k, int num_experts, int mype, int npes) {
   for (int i = threadIdx.x; i < tokens; i += blockDim.x) {
 #pragma unroll
     for (int j = 0; j < k; ++j) {
@@ -159,19 +158,7 @@ __device__ __forceinline__ void Dispatch(
     int mype,
     int npes
 ) {
-  Permute(
-      input_tokens,
-      send_tokens,
-      indices,
-      tokens_per_expert,
-      shared_expert_offset,
-      shared_token_offset,
-      k,
-      tokens,
-      input_dim,
-      num_experts,
-      mype
-  );
+  Permute(input_tokens, send_tokens, indices, tokens_per_expert, shared_expert_offset, shared_token_offset, k, tokens, input_dim, num_experts, mype);
 
   int* count = &tokens_per_expert[mype * num_experts];
   if (threadIdx.x == 0) {
