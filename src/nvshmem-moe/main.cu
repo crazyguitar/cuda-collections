@@ -137,7 +137,7 @@ __device__ __forceinline__ void Count(int* indices, int* tokens_per_expert, int 
  * @param send_tokens Output send buffer
  * @param indices Expert assignment indices
  * @param tokens_per_expert Token count per expert
- * @param shared_expert_offset Shared memory for expert offsets
+ * @param shared_send_offset Shared memory for expert offsets
  * @param shared_token_offset Shared memory for token offsets
  * @param k Number of experts per token
  * @param tokens Number of tokens
@@ -150,7 +150,7 @@ __device__ __forceinline__ void Permute(
     float* send_tokens,
     int* indices,
     int* tokens_per_expert,
-    int* shared_expert_offset,
+    int* shared_send_offset,
     int* shared_token_offset,
     int k,
     int tokens,
@@ -162,15 +162,15 @@ __device__ __forceinline__ void Permute(
   if (threadIdx.x == 0) {
     int prev = 0;
     for (int i = 0; i < num_experts; ++i) {
-      shared_expert_offset[i] = prev;
+      shared_send_offset[i] = prev;
       prev += count[i];
     }
 
     for (int i = 0; i < tokens; ++i) {
       for (int j = 0; j < k; ++j) {
         auto expert = indices[i * k + j];
-        shared_token_offset[i * k + j] = shared_expert_offset[expert];
-        ++shared_expert_offset[expert];
+        shared_token_offset[i * k + j] = shared_send_offset[expert];
+        ++shared_send_offset[expert];
       }
     }
   }
@@ -196,7 +196,7 @@ __device__ __forceinline__ void Permute(
  * @param recv_tokens Receive buffer
  * @param indices Expert assignment indices
  * @param tokens_per_expert Token count per expert
- * @param shared_expert_offset Shared memory for expert offsets
+ * @param shared_send_offset Shared memory for expert offsets
  * @param shared_token_offset Shared memory for token offsets
  * @param k Number of experts per token
  * @param tokens Number of tokens
@@ -213,8 +213,8 @@ __device__ __forceinline__ void Dispatch(
     float* recv_tokens,
     int* indices,
     int* tokens_per_expert,
-    int* shared_expert_offset,
     int* shared_token_offset,
+    int* shared_send_offset,
     int* shared_recv_offset,
     int k,
     int tokens,
@@ -225,13 +225,13 @@ __device__ __forceinline__ void Dispatch(
     int mype,
     int npes
 ) {
-  Permute(input_tokens, send_tokens, indices, tokens_per_expert, shared_expert_offset, shared_token_offset, k, tokens, input_dim, num_experts, mype);
+  Permute(input_tokens, send_tokens, indices, tokens_per_expert, shared_send_offset, shared_token_offset, k, tokens, input_dim, num_experts, mype);
 
   int* count = &tokens_per_expert[mype * num_experts];
   if (threadIdx.x == 0) {
     int prev = 0;
     for (int i = 0; i < num_experts; ++i) {
-      shared_expert_offset[i] = prev;
+      shared_send_offset[i] = prev;
       prev += count[i];
     }
 
@@ -247,7 +247,7 @@ __device__ __forceinline__ void Dispatch(
 
   for (int expert = threadIdx.x; expert < num_experts; expert += blockDim.x) {
     auto peer = expert / num_local_experts;
-    auto send_offset = shared_expert_offset[expert];
+    auto send_offset = shared_send_offset[expert];
     auto recv_offset = shared_recv_offset[mype * num_experts + expert];
     auto elem = count[expert] * input_dim;
     auto src = &send_tokens[send_offset * input_dim];
@@ -290,9 +290,9 @@ __global__ void MoEKernel(
     int npes
 ) {
   extern __shared__ char shared_buffer[];
-  int* shared_expert_offset = (int*)shared_buffer;
-  int* shared_token_offset = (int*)(shared_expert_offset + num_experts);
-  int* shared_recv_offset = (int*)(shared_token_offset + (tokens * k));
+  int* shared_token_offset = (int*)shared_buffer;
+  int* shared_send_offset = (int*)(shared_buffer + tokens * k);
+  int* shared_recv_offset = (int*)(shared_send_offset + num_experts);
 
   const auto idx = threadIdx.x + blockDim.x * blockIdx.x;
   curandState rand_state;
@@ -308,8 +308,8 @@ __global__ void MoEKernel(
       recv_tokens,
       indices,
       tokens_per_expert,
-      shared_expert_offset,
       shared_token_offset,
+      shared_send_offset,
       shared_recv_offset,
       k,
       tokens,
@@ -378,8 +378,8 @@ struct MoE {
   __host__ void Run() {
     auto mype = nvshmem.mype;
     auto npes = nvshmem.npes;
-    auto shared_expert_offset_size = sizeof(int) * num_experts;
     auto shared_token_offset_size = sizeof(int) * tokens * k;
+    auto shared_send_offset_size = sizeof(int) * num_experts;
     auto shared_recv_offset_size = sizeof(int) * npes * num_experts;
 
     cudaLaunchConfig_t cfg{0};
@@ -387,7 +387,7 @@ struct MoE {
     int grid_dim = 1;  // use single sm
     cfg.gridDim = dim3(grid_dim, 1, 1);
     cfg.blockDim = dim3(block_dim, 1, 1);
-    cfg.dynamicSmemBytes = shared_expert_offset_size + shared_token_offset_size + shared_recv_offset_size;
+    cfg.dynamicSmemBytes = shared_token_offset_size + shared_send_offset_size + shared_recv_offset_size;
     cfg.stream = stream;
     LAUNCH_KERNEL(
         &cfg,
