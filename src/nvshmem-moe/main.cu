@@ -80,17 +80,8 @@ __device__ __forceinline__ void InitTokens(curandState& state, float* x, int tok
   }
 }
 
-__device__ __forceinline__ void Count(
-    int* indices,
-    int* tokens_per_expert,
-    int* tokens_per_pe,
-    int tokens,
-    int k,
-    int num_experts,
-    int num_local_experts,
-    int mype,
-    int npes
-) {
+__device__ __forceinline__ void
+Count(int* indices, int* tokens_per_expert, int tokens, int k, int num_experts, int mype, int npes) {
   for (int i = threadIdx.x; i < tokens; i += blockDim.x) {
 #pragma unroll
     for (int j = 0; j < k; ++j) {
@@ -104,15 +95,6 @@ __device__ __forceinline__ void Count(
     int* dst = &tokens_per_expert[num_experts * peer];
     int* src = &tokens_per_expert[num_experts * mype];
     nvshmem_int_put(dst, src, num_experts, peer);
-  }
-  __syncthreads();
-  for (int i = threadIdx.x; i < num_experts; i += blockDim.x) {
-    int pe = i / num_local_experts;
-    int offset = i % num_local_experts;
-    int expert = pe + offset;
-    for (int j = 0; j < npes; ++j) {
-      atomicAdd(&tokens_per_pe[pe], tokens_per_expert[expert + j * num_experts]);
-    }
   }
   __syncthreads();
 }
@@ -134,13 +116,13 @@ __device__ __forceinline__ void Permute(
   if (threadIdx.x == 0) {
     int prev = 0;
     for (int i = 0; i < num_experts; ++i) {
-      prev += count[i];
       shared_expert_offset[i] = prev;
+      prev += count[i];
     }
     for (int i = 0; i < tokens; ++i) {
       for (int j = 0; j < k; ++j) {
         auto expert = indices[i * k + j];
-        shared_token_offset[i * k + j] = shared_expert_offset[expert] - count[expert];
+        shared_token_offset[i * k + j] = shared_expert_offset[expert];
         ++shared_expert_offset[expert];
       }
     }
@@ -171,7 +153,9 @@ __device__ __forceinline__ void Dispatch(
     int k,
     int tokens,
     int input_dim,
+    int max_tokens,
     int num_experts,
+    int num_local_experts,
     int mype,
     int npes
 ) {
@@ -189,7 +173,36 @@ __device__ __forceinline__ void Dispatch(
       mype
   );
 
-  // TODO: dispatch
+  int* count = &tokens_per_expert[mype * num_experts];
+  if (threadIdx.x == 0) {
+    int prev = 0;
+    for (int i = 0; i < num_experts; ++i) {
+      shared_expert_offset[i] = prev;
+      prev += count[i];
+    }
+  }
+  __syncthreads();
+
+  for (int expert = threadIdx.x; expert < num_experts; expert += blockDim.x) {
+    auto peer = expert / num_local_experts;
+    if (peer == mype) continue;
+    auto offset = shared_expert_offset[expert];
+    auto elem = count[expert] * input_dim;
+    auto src = &send_tokens[offset * input_dim];
+    auto dst = &recv_tokens[expert * max_tokens * input_dim];
+    nvshmem_float_put(dst, src, elem, peer);
+  }
+
+  for (int i = 0; i < num_local_experts; ++i) {
+    auto expert = mype * num_local_experts + i;
+    auto offset = shared_expert_offset[expert];
+    auto elem = count[expert] * input_dim;
+    auto src = &send_tokens[offset * input_dim];
+    auto dst = &recv_tokens[expert * max_tokens * input_dim];
+    for (int i = threadIdx.x; i < elem; i += blockDim.x) {
+      dst[i] = src[i];
+    }
+  }
 }
 
 __global__ void MoEKernel(
@@ -198,11 +211,11 @@ __global__ void MoEKernel(
     float* recv_tokens,
     int* indices,
     int* tokens_per_expert,
-    int* tokens_per_pe,
     int seed,
     int k,
     int tokens,
     int input_dim,
+    int max_tokens,
     int num_experts,
     int num_local_experts,
     int mype,
@@ -219,7 +232,7 @@ __global__ void MoEKernel(
   InitTokens(rand_state, input_tokens, tokens, input_dim);
   __syncthreads();
 
-  Count(indices, tokens_per_expert, tokens_per_pe, tokens, k, num_experts, num_local_experts, mype, npes);
+  Count(indices, tokens_per_expert, tokens, k, num_experts, mype, npes);
   Dispatch(
       input_tokens,
       send_tokens,
@@ -231,7 +244,9 @@ __global__ void MoEKernel(
       k,
       tokens,
       input_dim,
+      max_tokens,
       num_experts,
+      num_local_experts,
       mype,
       npes
   );
@@ -254,7 +269,6 @@ struct MoE {
   int max_tokens;
   int* d_indices;
   int* d_tokens_per_expert;
-  int* d_tokens_per_pe;
   float* d_input_tokens;
   float* d_send_tokens;
   float* d_recv_tokens;
@@ -268,10 +282,9 @@ struct MoE {
     CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
     CUDA_CHECK(cudaStreamCreate(&stream));
     CUDA_CHECK(cudaMalloc(&d_indices, sizeof(int) * tokens * k));
-    CUDA_CHECK(cudaMalloc(&d_tokens_per_pe, sizeof(int) * npes));
     CUDA_CHECK(cudaMalloc(&d_input_tokens, sizeof(int) * tokens * input_dim));
     d_send_tokens = static_cast<float*>(nvshmem_malloc(sizeof(float) * k * tokens * input_dim));
-    d_recv_tokens = static_cast<float*>(nvshmem_malloc(sizeof(float) * npes * max_tokens * input_dim));
+    d_recv_tokens = static_cast<float*>(nvshmem_malloc(sizeof(float) * num_experts * max_tokens * input_dim));
     d_tokens_per_expert = static_cast<int*>(nvshmem_malloc(sizeof(int) * npes * num_experts));
   }
 
@@ -279,7 +292,6 @@ struct MoE {
     nvshmem_free(d_send_tokens);
     nvshmem_free(d_recv_tokens);
     nvshmem_free(d_tokens_per_expert);
-    CUDA_CHECK(cudaFree(d_tokens_per_pe));
     CUDA_CHECK(cudaFree(d_indices));
     CUDA_CHECK(cudaStreamDestroy(stream));
   }
@@ -305,11 +317,11 @@ struct MoE {
         d_recv_tokens,
         d_indices,
         d_tokens_per_expert,
-        d_tokens_per_pe,
         seed,
         k,
         tokens,
         input_dim,
+        max_tokens,
         num_experts,
         num_local_experts,
         mype,
