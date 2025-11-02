@@ -216,6 +216,7 @@ __device__ __forceinline__ void Dispatch(
     int* tokens_per_expert,
     int* shared_expert_offset,
     int* shared_token_offset,
+    int* shared_recv_offset,
     int k,
     int tokens,
     int input_dim,
@@ -234,28 +235,25 @@ __device__ __forceinline__ void Dispatch(
       shared_expert_offset[i] = prev;
       prev += count[i];
     }
+
+    for (int i = 0; i < num_experts; ++i) {
+      prev = 0;
+      for (int peer = 0; peer < npes; ++peer) {
+        shared_recv_offset[peer * num_experts + i] = prev;
+        prev += tokens_per_expert[peer * num_experts + i];
+      }
+    }
   }
   __syncthreads();
 
   for (int expert = threadIdx.x; expert < num_experts; expert += blockDim.x) {
     auto peer = expert / num_local_experts;
-    if (peer == mype) continue;
-    auto offset = shared_expert_offset[expert];
+    auto send_offset = shared_expert_offset[expert];
+    auto recv_offset = shared_recv_offset[mype * num_experts + expert];
     auto elem = count[expert] * input_dim;
-    auto src = &send_tokens[offset * input_dim];
-    auto dst = &recv_tokens[expert * max_tokens * input_dim];
+    auto src = &send_tokens[send_offset * input_dim];
+    auto dst = &recv_tokens[recv_offset * input_dim];
     nvshmem_float_put(dst, src, elem, peer);
-  }
-
-  for (int i = 0; i < num_local_experts; ++i) {
-    auto expert = mype * num_local_experts + i;
-    auto offset = shared_expert_offset[expert];
-    auto elem = count[expert] * input_dim;
-    auto src = &send_tokens[offset * input_dim];
-    auto dst = &recv_tokens[expert * max_tokens * input_dim];
-    for (int i = threadIdx.x; i < elem; i += blockDim.x) {
-      dst[i] = src[i];
-    }
   }
 }
 
@@ -295,6 +293,7 @@ __global__ void MoEKernel(
   extern __shared__ char shared_buffer[];
   int* shared_expert_offset = (int*)shared_buffer;
   int* shared_token_offset = (int*)(shared_expert_offset + num_experts);
+  int* shared_recv_offset = (int*)(shared_token_offset + (tokens * k));
 
   const auto idx = threadIdx.x + blockDim.x * blockIdx.x;
   curandState rand_state;
@@ -312,6 +311,7 @@ __global__ void MoEKernel(
       tokens_per_expert,
       shared_expert_offset,
       shared_token_offset,
+      shared_recv_offset,
       k,
       tokens,
       input_dim,
@@ -377,17 +377,18 @@ struct MoE {
    * @brief Execute MoE kernel with configured parameters
    */
   __host__ void Run() {
-    auto shared_expert_offset_size = sizeof(int) * num_experts;
-    auto shared_token_offset_size = sizeof(int) * tokens * k;
-
     auto mype = nvshmem.mype;
     auto npes = nvshmem.npes;
+    auto shared_expert_offset_size = sizeof(int) * num_experts;
+    auto shared_token_offset_size = sizeof(int) * tokens * k;
+    auto shared_recv_offset_size = sizeof(int) * npes * num_experts;
+
     cudaLaunchConfig_t cfg{0};
     int block_dim = std::min(tokens, prop.maxThreadsPerBlock);
     int grid_dim = 1;  // use single sm
     cfg.gridDim = dim3(grid_dim, 1, 1);
     cfg.blockDim = dim3(block_dim, 1, 1);
-    cfg.dynamicSmemBytes = shared_expert_offset_size + shared_token_offset_size;
+    cfg.dynamicSmemBytes = shared_expert_offset_size + shared_token_offset_size + shared_recv_offset_size;
     cfg.stream = stream;
     LAUNCH_KERNEL(
         &cfg,
