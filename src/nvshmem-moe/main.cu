@@ -124,8 +124,7 @@ __device__ __forceinline__ void Count(int* indices, int* tokens_per_expert, int 
   __syncthreads();
 
   for (int peer = threadIdx.x; peer < npes; peer += blockDim.x) {
-    if (peer == mype) continue;
-    int* dst = &tokens_per_expert[num_experts * peer];
+    int* dst = &tokens_per_expert[num_experts * mype];
     int* src = &tokens_per_expert[num_experts * mype];
     nvshmem_int_put(dst, src, num_experts, peer);
   }
@@ -297,7 +296,7 @@ __global__ void MoEKernel(
 
   const auto idx = threadIdx.x + blockDim.x * blockIdx.x;
   curandState rand_state;
-  curand_init(seed, idx, 0, &rand_state);
+  curand_init(seed + mype, idx, 0, &rand_state);
   InitIndices(rand_state, indices, k, tokens, num_experts);
   InitTokens(rand_state, input_tokens, tokens, input_dim);
   __syncthreads();
