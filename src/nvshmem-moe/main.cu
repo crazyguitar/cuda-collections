@@ -106,14 +106,23 @@ __device__ __forceinline__ void InitTokens(curandState& state, float* x, int tok
  * @param npes Total number of PEs
  */
 __device__ __forceinline__ void Count(int* indices, int* tokens_per_expert, int tokens, int k, int num_experts, int mype, int npes) {
-  for (int i = threadIdx.x; i < tokens; i += blockDim.x) {
+  for (int i = threadIdx.x; i < num_experts; i += blockDim.x) {
+    tokens_per_expert[i + num_experts * mype] = 0;
+  }
+  __syncthreads();
+
+  // Single thread does the counting to avoid race conditions
+  if (threadIdx.x == 0) {
 #pragma unroll
-    for (int j = 0; j < k; ++j) {
-      int expert = indices[j + i * k];
-      atomicAdd(&tokens_per_expert[expert + num_experts * mype], 1);
+    for (int i = 0; i < tokens; i++) {
+      for (int j = 0; j < k; j++) {
+        int expert = indices[j + i * k];
+        ++tokens_per_expert[expert + num_experts * mype];
+      }
     }
   }
   __syncthreads();
+
   for (int peer = threadIdx.x; peer < npes; peer += blockDim.x) {
     if (peer == mype) continue;
     int* dst = &tokens_per_expert[num_experts * peer];
@@ -157,6 +166,7 @@ __device__ __forceinline__ void Permute(
       shared_expert_offset[i] = prev;
       prev += count[i];
     }
+
     for (int i = 0; i < tokens; ++i) {
       for (int j = 0; j < k; ++j) {
         auto expert = indices[i * k + j];
