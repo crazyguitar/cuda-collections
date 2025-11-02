@@ -407,6 +407,9 @@ struct MoE {
         mype,
         npes
     );
+
+    nvshmemx_barrier_all_on_stream(stream);
+    CUDA_CHECK(cudaStreamSynchronize(stream));
   }
 };
 
