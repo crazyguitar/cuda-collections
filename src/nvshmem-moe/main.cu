@@ -230,29 +230,58 @@ __device__ __forceinline__ void Dispatch(
   int* count = &tokens_per_expert[mype * num_experts];
   if (threadIdx.x == 0) {
     int prev = 0;
-    for (int i = 0; i < num_experts; ++i) {
+    for (int i = 0; i < npes; ++i) {
       shared_send_offset[i] = prev;
-      prev += count[i];
-    }
-
-    for (int i = 0; i < num_experts; ++i) {
-      prev = 0;
-      for (int peer = 0; peer < npes; ++peer) {
-        shared_recv_offset[peer * num_experts + i] = prev;
-        prev += tokens_per_expert[peer * num_experts + i];
+      int idx = i * num_local_experts;
+      for (int j = 0; j < num_local_experts; ++j) {
+        int expert = idx + j;
+        prev += count[expert];
       }
     }
   }
   __syncthreads();
 
-  for (int expert = threadIdx.x; expert < num_experts; expert += blockDim.x) {
-    auto peer = expert / num_local_experts;
-    auto send_offset = shared_send_offset[expert];
-    auto recv_offset = shared_recv_offset[mype * num_experts + expert];
-    auto elem = count[expert] * input_dim;
-    auto src = &send_tokens[send_offset * input_dim];
-    auto dst = &recv_tokens[recv_offset * input_dim];
+  for (int peer = threadIdx.x; peer < npes; peer += blockDim.x) {
+    int prev = 0;
+    for (int i = 0; i < npes; ++i) {
+      shared_recv_offset[i * npes + peer] = prev;
+      for (int j = 0; j < num_local_experts; ++j) {
+        int expert = peer * num_local_experts + j;
+        prev += tokens_per_expert[i * num_experts + expert];
+      }
+    }
+  }
+  __syncthreads();
+
+  // if (threadIdx.x == 0 and mype == 1) {
+  //   for (int i = 0; i < npes; ++i) {
+  //     for (int j = 0; j < num_experts; ++j) {
+  //       printf("%d ", tokens_per_expert[i * num_experts + j]);
+  //     }
+  //     printf("\n");
+  //   }
+
+  //   for (int i = 0; i < npes; ++i) {
+  //     for (int j = 0; j < npes; ++j) {
+  //       printf("%d ", shared_recv_offset[i * npes + j]);
+  //     }
+  //     printf("\n");
+  //   }
+  // }
+  // __syncthreads();
+
+  for (int peer = threadIdx.x; peer < npes; peer += blockDim.x) {
+    int elem = 0;
+    for (int i = 0; i < num_local_experts; ++i) elem += count[peer * num_local_experts + i];
+    int send_offset = shared_send_offset[peer];
+    int recv_offset = shared_recv_offset[mype * npes + peer];
+    float* src = &send_tokens[send_offset * input_dim];
+    float* dst = &recv_tokens[recv_offset * input_dim];
     nvshmem_float_put(dst, src, elem, peer);
+
+    // if (mype == 1) {
+    //   printf("mype=%d, peer=%d, send_offet=%d, recv_offset=%d\n", mype, peer, send_offset, recv_offset);
+    // }
   }
 }
 
@@ -323,9 +352,9 @@ __global__ void MoEKernel(
 }
 
 struct MoE {
-  constexpr static int batch_size = 4;
-  constexpr static int sequence_len = 1024;
-  constexpr static int input_dim = 512;
+  constexpr static int batch_size = 2;
+  constexpr static int sequence_len = 16;
+  constexpr static int input_dim = 8;
   constexpr static int num_local_experts = 2;
   constexpr static int k = 2;
   constexpr static int seed = 123;
@@ -357,7 +386,7 @@ struct MoE {
     CUDA_CHECK(cudaMalloc(&d_indices, sizeof(int) * tokens * k));
     CUDA_CHECK(cudaMalloc(&d_input_tokens, sizeof(int) * tokens * input_dim));
     d_send_tokens = static_cast<float*>(nvshmem_malloc(sizeof(float) * k * tokens * input_dim));
-    d_recv_tokens = static_cast<float*>(nvshmem_malloc(sizeof(float) * num_experts * max_tokens * input_dim));
+    d_recv_tokens = static_cast<float*>(nvshmem_malloc(sizeof(float) * max_tokens * input_dim));
     d_tokens_per_expert = static_cast<int*>(nvshmem_malloc(sizeof(int) * npes * num_experts));
   }
 
@@ -369,6 +398,7 @@ struct MoE {
     nvshmem_free(d_recv_tokens);
     nvshmem_free(d_tokens_per_expert);
     CUDA_CHECK(cudaFree(d_indices));
+    CUDA_CHECK(cudaFree(d_input_tokens));
     CUDA_CHECK(cudaStreamDestroy(stream));
   }
 
@@ -380,7 +410,7 @@ struct MoE {
     auto npes = nvshmem.npes;
     auto shared_token_offset_size = sizeof(int) * tokens * k;
     auto shared_send_offset_size = sizeof(int) * num_experts;
-    auto shared_recv_offset_size = sizeof(int) * npes * num_experts;
+    auto shared_recv_offset_size = sizeof(int) * npes * npes;
 
     cudaLaunchConfig_t cfg{0};
     int block_dim = std::min(tokens, prop.maxThreadsPerBlock);
