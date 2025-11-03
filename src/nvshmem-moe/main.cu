@@ -106,8 +106,9 @@ __device__ __forceinline__ void InitTokens(curandState& state, float* x, int tok
  * @param npes Total number of PEs
  */
 __device__ __forceinline__ void Count(int* indices, int* tokens_per_expert, int tokens, int k, int num_experts, int mype, int npes) {
-  for (int i = threadIdx.x; i < num_experts; i += blockDim.x) {
-    tokens_per_expert[i + num_experts * mype] = 0;
+  // Initialize all entries to 0
+  for (int i = threadIdx.x; i < num_experts * npes; i += blockDim.x) {
+    tokens_per_expert[i] = 0;
   }
   __syncthreads();
 
@@ -129,6 +130,16 @@ __device__ __forceinline__ void Count(int* indices, int* tokens_per_expert, int 
     nvshmem_int_put(dst, src, num_experts, peer);
   }
   __syncthreads();
+
+  // if (threadIdx.x == 0 and mype == 1) {
+  //   for (int i = 0; i < npes; ++i) {
+  //     for (int j = 0; j < num_experts; ++j) {
+  //       printf("%d ", tokens_per_expert[i * num_experts + j]);
+  //     }
+  //     printf("\n");
+  //   }
+  // }
+  // __syncthreads();
 }
 
 /**
