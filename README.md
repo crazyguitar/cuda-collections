@@ -13,6 +13,7 @@
 * [nvshmem-put-nbi-warp](src/nvshmem-put-nbi-warp)
 * [nvshmem-collective-launch](src/nvshmem-collective-launch)
 * [nvshmem-all2all](src/nvshmem-all2all)
+* [nvshmem-moe-count](src/nvshmem-moe-count)
 * [nccl-symmetric-memory ](src/nccl-symmetric-memory)
 
 ```
