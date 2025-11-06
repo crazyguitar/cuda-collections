@@ -19,12 +19,12 @@ constexpr int BUFSIZE = 16;
 
 // define a global device symbol. The device symbol is similar to global variable
 // but it can only be used by device
-__device__ int const_dev_data[BUFSIZE];
+__device__ int dev_data[BUFSIZE];
 
 __global__ void Kernel(int size) {
   int idx = threadIdx.x + blockIdx.x * blockDim.x;
   if (idx < size) {
-    ++const_dev_data[idx];
+    ++dev_data[idx];
   }
 }
 
@@ -40,10 +40,11 @@ struct Test {
   cudaStream_t stream;
 
   __host__ Test() {
+    CUDA_CHECK(cudaSetDevice(0));
     Rand(input, BUFSIZE, 0, 10);
     CUDA_CHECK(cudaStreamCreate(&stream));
     // constant symbol doesn't need to alloc device memory manually
-    CUDA_CHECK(cudaMemcpyToSymbol(const_dev_data, input, sizeof(int) * BUFSIZE));
+    CUDA_CHECK(cudaMemcpyToSymbol(dev_data, input, sizeof(int) * BUFSIZE));
   }
 
   __host__ ~Test() {
@@ -67,7 +68,7 @@ struct Test {
     cfg.stream = stream;
     LAUNCH_KERNEL(&cfg, Kernel, BUFSIZE);
     CUDA_CHECK(cudaStreamSynchronize(stream));
-    CUDA_CHECK(cudaMemcpyFromSymbol(output, const_dev_data, sizeof(int) * BUFSIZE));
+    CUDA_CHECK(cudaMemcpyFromSymbol(output, dev_data, sizeof(int) * BUFSIZE));
     Verify(output, BUFSIZE);
   }
 };
