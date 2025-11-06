@@ -5,6 +5,7 @@
 * [warp](src/warp)
 * [\_\_shfl](src/__shfl)
 * [device-symbol](src/device-symbol)
+* [zero-copy](src/zero-copy)
 * [nvshmem-hello](src/nvshmem-hello)
 * [nvshmem-mpi](src/nvshmem-mpi)
 * [nvshmem-mpi-uid](src/nvshmem-mpi-uid)
