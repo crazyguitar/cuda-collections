@@ -6,8 +6,6 @@
 * [\_\_shfl](src/__shfl)
 * [device-symbol](src/device-symbol)
 * [zero-copy](src/zero-copy)
-* [zero-copy2](src/zero-copy2)
-* [zero-copy3](src/zero-copy3)
 * [nvshmem-hello](src/nvshmem-hello)
 * [nvshmem-mpi](src/nvshmem-mpi)
 * [nvshmem-mpi-uid](src/nvshmem-mpi-uid)
