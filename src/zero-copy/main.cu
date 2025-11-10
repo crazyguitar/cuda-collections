@@ -3,7 +3,6 @@
 #include <cassert>
 #include <cstdio>
 #include <random>
-#include <typeinfo>
 
 #define CUDA_CHECK(exp)                                                                                     \
   do {                                                                                                      \
@@ -70,21 +69,51 @@ struct Test {
     float elapse;
     Rand(host_input_x, BUFSIZE, 0, 10);
     Rand(host_input_y, BUFSIZE, 0, 10);
-    static_cast<T*>(this)->Warmup();
+    // warmup
+    for (int i = 0; i < warmup; ++i) static_cast<T*>(this)->Launch();
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    // benchmark
     CUDA_CHECK(cudaEventRecord(start, stream));
-    static_cast<T*>(this)->Bench();
+    for (int i = 0; i < iterations; ++i) static_cast<T*>(this)->Launch();
     CUDA_CHECK(cudaEventRecord(stop, stream));
     CUDA_CHECK(cudaEventSynchronize(stop));
     CUDA_CHECK(cudaEventElapsedTime(&elapse, start, stop));
     CUDA_CHECK(cudaStreamSynchronize(stream));
     Verify(host_input_x, host_input_y, host_output, BUFSIZE);
     auto latency = elapse / iterations;
-    printf("[%s] elapse: %f, latency: %f\n", typeid(T).name(), elapse, latency);
+    printf("elapse: %f, latency: %f\n", elapse, latency);
   }
 };
 
-struct TestHostRegister : public Test<TestHostRegister> {
-  __host__ TestHostRegister() : Test() {
+struct TestZeroCopy : public Test<TestZeroCopy> {
+  __host__ __forceinline__ void Launch() {
+    int grid_dim = 1;
+    int block_dim = BUFSIZE;
+    cudaLaunchConfig_t cfg{0};
+    cfg.gridDim = dim3(grid_dim, 1, 1);
+    cfg.blockDim = dim3(block_dim, 1, 1);
+    cfg.stream = stream;
+    LAUNCH_KERNEL(&cfg, Kernel, dev_input_x, dev_input_y, dev_output, BUFSIZE);
+  }
+};
+
+struct TestCopy : public Test<TestCopy> {
+  __host__ __forceinline__ void Launch() {
+    CUDA_CHECK(cudaMemcpyAsync(dev_input_x, host_input_x, sizeof(int) * BUFSIZE, cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(dev_input_y, host_input_y, sizeof(int) * BUFSIZE, cudaMemcpyHostToDevice, stream));
+    int grid_dim = 1;
+    int block_dim = BUFSIZE;
+    cudaLaunchConfig_t cfg{0};
+    cfg.gridDim = dim3(grid_dim, 1, 1);
+    cfg.blockDim = dim3(block_dim, 1, 1);
+    cfg.stream = stream;
+    LAUNCH_KERNEL(&cfg, Kernel, dev_input_x, dev_input_y, dev_output, BUFSIZE);
+    CUDA_CHECK(cudaMemcpyAsync(host_output, dev_output, sizeof(int) * BUFSIZE, cudaMemcpyDeviceToHost, stream));
+  }
+};
+
+struct TestHostRegister : public TestZeroCopy {
+  __host__ TestHostRegister() : TestZeroCopy() {
     host_input_x = static_cast<int*>(malloc(sizeof(int) * BUFSIZE));
     host_input_y = static_cast<int*>(malloc(sizeof(int) * BUFSIZE));
     host_output = static_cast<int*>(malloc(sizeof(int) * BUFSIZE));
@@ -104,28 +133,65 @@ struct TestHostRegister : public Test<TestHostRegister> {
     free(host_input_y);
     free(host_output);
   }
+};
 
-  __host__ void Launch() {
-    int grid_dim = 1;
-    int block_dim = BUFSIZE;
-    cudaLaunchConfig_t cfg{0};
-    cfg.gridDim = dim3(grid_dim, 1, 1);
-    cfg.blockDim = dim3(block_dim, 1, 1);
-    cfg.stream = stream;
-    LAUNCH_KERNEL(&cfg, Kernel, dev_input_x, dev_input_y, dev_output, BUFSIZE);
+struct TestMallocHost : public TestZeroCopy {
+  __host__ TestMallocHost() : TestZeroCopy() {
+    CUDA_CHECK(cudaMallocHost(&host_input_x, sizeof(int) * BUFSIZE, cudaHostAllocMapped));
+    CUDA_CHECK(cudaMallocHost(&host_input_y, sizeof(int) * BUFSIZE, cudaHostAllocMapped));
+    CUDA_CHECK(cudaMallocHost(&host_output, sizeof(int) * BUFSIZE, cudaHostAllocMapped));
+    CUDA_CHECK(cudaHostGetDevicePointer(&dev_input_x, host_input_x, 0));
+    CUDA_CHECK(cudaHostGetDevicePointer(&dev_input_y, host_input_y, 0));
+    CUDA_CHECK(cudaHostGetDevicePointer(&dev_output, host_output, 0));
   }
 
-  __host__ void Warmup() {
-    for (int i = 0; i < warmup; ++i) Launch();
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-  }
-
-  __host__ void Bench() {
-    for (int i = 0; i < iterations; ++i) Launch();
+  __host__ ~TestMallocHost() override {
+    CUDA_CHECK(cudaFreeHost(host_input_x));
+    CUDA_CHECK(cudaFreeHost(host_input_y));
+    CUDA_CHECK(cudaFreeHost(host_output));
   }
 };
 
-int main(int argc, char* argv[]) {
-  TestHostRegister t1;
-  t1.Run();
+struct TestHostAlloc : public TestZeroCopy {
+  __host__ TestHostAlloc() : TestZeroCopy() {
+    CUDA_CHECK(cudaHostAlloc(&host_input_x, sizeof(int) * BUFSIZE, cudaHostAllocMapped));
+    CUDA_CHECK(cudaHostAlloc(&host_input_y, sizeof(int) * BUFSIZE, cudaHostAllocMapped));
+    CUDA_CHECK(cudaHostAlloc(&host_output, sizeof(int) * BUFSIZE, cudaHostAllocMapped));
+    CUDA_CHECK(cudaHostGetDevicePointer(&dev_input_x, host_input_x, 0));
+    CUDA_CHECK(cudaHostGetDevicePointer(&dev_input_y, host_input_y, 0));
+    CUDA_CHECK(cudaHostGetDevicePointer(&dev_output, host_output, 0));
+  }
+
+  __host__ ~TestHostAlloc() override {
+    CUDA_CHECK(cudaFreeHost(host_input_x));
+    CUDA_CHECK(cudaFreeHost(host_input_y));
+    CUDA_CHECK(cudaFreeHost(host_output));
+  }
+};
+
+struct TestMemcpy : public TestCopy {
+  __host__ TestMemcpy() : TestCopy() {
+    host_input_x = static_cast<int*>(malloc(sizeof(int) * BUFSIZE));
+    host_input_y = static_cast<int*>(malloc(sizeof(int) * BUFSIZE));
+    host_output = static_cast<int*>(malloc(sizeof(int) * BUFSIZE));
+    CUDA_CHECK(cudaMalloc(&dev_input_x, sizeof(int) * BUFSIZE));
+    CUDA_CHECK(cudaMalloc(&dev_input_y, sizeof(int) * BUFSIZE));
+    CUDA_CHECK(cudaMalloc(&dev_output, sizeof(int) * BUFSIZE));
+  }
+
+  __host__ ~TestMemcpy() {
+    CUDA_CHECK(cudaFree(dev_input_x));
+    CUDA_CHECK(cudaFree(dev_input_y));
+    CUDA_CHECK(cudaFree(dev_output));
+    free(host_input_x);
+    free(host_input_y);
+    free(host_output);
+  }
+};
+
+template <typename... T>
+void Run() {
+  (T{}.Run(), ...);
 }
+
+int main(int argc, char* argv[]) { Run<TestHostRegister, TestMallocHost, TestHostAlloc, TestMemcpy>(); }
