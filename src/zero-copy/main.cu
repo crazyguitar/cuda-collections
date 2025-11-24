@@ -112,6 +112,23 @@ struct TestCopy : public Test<TestCopy> {
   }
 };
 
+struct TestMallocManaged : public TestZeroCopy {
+  __host__ TestMallocManaged() : TestZeroCopy() {
+    CUDA_CHECK(cudaMallocManaged(&host_input_x, sizeof(int) * BUFSIZE));
+    CUDA_CHECK(cudaMallocManaged(&host_input_y, sizeof(int) * BUFSIZE));
+    CUDA_CHECK(cudaMallocManaged(&host_output, sizeof(int) * BUFSIZE));
+    dev_input_x = host_input_x;
+    dev_input_y = host_input_y;
+    dev_output = host_output;
+  }
+
+  __host__ ~TestMallocManaged() {
+    CUDA_CHECK(cudaHostUnregister(host_input_x));
+    CUDA_CHECK(cudaHostUnregister(host_input_y));
+    CUDA_CHECK(cudaHostUnregister(host_output));
+  }
+};
+
 struct TestHostRegister : public TestZeroCopy {
   __host__ TestHostRegister() : TestZeroCopy() {
     host_input_x = static_cast<int*>(malloc(sizeof(int) * BUFSIZE));
@@ -194,4 +211,4 @@ void Run() {
   (T{}.Run(), ...);
 }
 
-int main(int argc, char* argv[]) { Run<TestHostRegister, TestMallocHost, TestHostAlloc, TestMemcpy>(); }
+int main(int argc, char* argv[]) { Run<TestHostRegister, TestMallocManaged, TestMallocHost, TestHostAlloc, TestMemcpy>(); }
