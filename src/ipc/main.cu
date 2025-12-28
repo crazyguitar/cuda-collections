@@ -1,3 +1,7 @@
+/**
+ * CUDA IPC Ring Communication
+ */
+
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <mpi/mpi.h>
@@ -113,6 +117,28 @@ struct Test {
   }
 };
 
+/**
+ * Rank 0                                    Rank 1                                   Rank N-1
+ *   |                                         |                                         |
+ *   |-- cudaMalloc(d_buf) --------------------|-- cudaMalloc(d_buf) --------------------|
+ *   |                                         |                                         |
+ *   |-- cudaIpcGetMemHandle(handle) ----------|-- cudaIpcGetMemHandle(handle) ----------|
+ *   |                                         |                                         |
+ *   |<------------------ MPI_Allgather (exchange all handles) ------------------------->|
+ *   |                                         |                                         |
+ *   |-- cudaIpcOpenMemHandle(peers[]) --------|-- cudaIpcOpenMemHandle(peers[]) --------|
+ *   |                                         |                                         |
+ *   |-- write_to_peer(peers[1]) ------------->|    (GPU 0 writes to GPU 1's buf)        |
+ *   |                                         |-- write_to_peer(peers[2]) ------------->|
+ *   |    (GPU N-1 writes to GPU 0's buf) <----|-----------------------------------------|
+ *   |                                         |                                         |
+ *   |<------------------ MPI_Barrier (sync all) --------------------------------------->|
+ *   |                                         |                                         |
+ *   |-- verify_buffer(d_buf) -----------------|-- verify_buffer(d_buf) -----------------|
+ *   |    (check data from rank N-1)           |    (check data from rank 0)             |
+ *   |                                         |                                         |
+ *   |-- cudaIpcCloseMemHandle ----------------|-- cudaIpcCloseMemHandle ----------------|
+ */
 // mpirun -np 8 ./build/src/ipc/ipc
 int main(int argc, char* argv[]) {
   Test test;
