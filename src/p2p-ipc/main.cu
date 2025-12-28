@@ -1,5 +1,20 @@
 /**
- * CUDA IPC Ring Communication
+ * CUDA IPC Ring Communication (Multi-Process)
+ *
+ * Comparison: IPC vs P2P Direct
+ * ┌─────────────────────┬──────────────────────────────┬──────────────────────────────┐
+ * │                     │ IPC (this file)              │ P2P Direct (p2p-nvlink)      │
+ * ├─────────────────────┼──────────────────────────────┼──────────────────────────────┤
+ * │ Process model       │ Multi-process (MPI)          │ Single process, multi-GPU    │
+ * │ API                 │ cudaIpcGetMemHandle          │ cudaDeviceEnablePeerAccess   │
+ * │ Setup               │ Exchange handles via MPI     │ Just enable peer access      │
+ * │ Launch              │ mpirun -np N ./p2p-ipc       │ ./p2p-nvlink                 │
+ * │ Fault isolation     │ Process isolation            │ None                         │
+ * │ Use case            │ HPC/ML distributed training  │ Simple multi-GPU apps        │
+ * │ NCCL/NVSHMEM        │ Uses IPC internally          │ Not compatible               │
+ * ├─────────────────────┴──────────────────────────────┴──────────────────────────────┤
+ * │ Both use same hardware path: NVLink (if available) or PCIe                        │
+ * └───────────────────────────────────────────────────────────────────────────────────┘
  */
 
 #include <cuda.h>
