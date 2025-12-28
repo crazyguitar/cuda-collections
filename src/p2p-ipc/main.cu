@@ -20,6 +20,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <mpi/mpi.h>
+
 #include <cstdio>
 #include <vector>
 
@@ -88,6 +89,28 @@ struct Peer {
     }
     CUDA_CHECK(cudaFree(d_buf));
   }
+
+  void PrintP2PAttributes() {
+    if (pe != 0) return;
+    printf("\n=== P2P Attributes (GPU 0 -> GPU X) ===\n");
+    for (int i = 1; i < npes; ++i) {
+      int val;
+      printf("GPU 0 -> GPU %d:\n", i);
+
+      CUDA_CHECK(cudaDeviceGetP2PAttribute(&val, cudaDevP2PAttrPerformanceRank, device, i));
+      printf("  PerformanceRank:        %d (higher=better)\n", val);
+
+      CUDA_CHECK(cudaDeviceGetP2PAttribute(&val, cudaDevP2PAttrAccessSupported, device, i));
+      printf("  AccessSupported:        %s\n", val ? "Yes" : "No");
+
+      CUDA_CHECK(cudaDeviceGetP2PAttribute(&val, cudaDevP2PAttrNativeAtomicSupported, device, i));
+      printf("  NativeAtomicSupported:  %s (Yes=NVLink, No=PCIe)\n", val ? "Yes" : "No");
+
+      CUDA_CHECK(cudaDeviceGetP2PAttribute(&val, cudaDevP2PAttrCudaArrayAccessSupported, device, i));
+      printf("  CudaArrayAccessSupported: %s\n", val ? "Yes" : "No");
+      printf("\n");
+    }
+  }
 };
 
 struct Test {
@@ -102,6 +125,8 @@ struct Test {
 
   void Run() {
     auto peer = Peer();
+    peer.PrintP2PAttributes();
+
     int block = 256;
     int grid = (Peer::kBufsize + block - 1) / block;
     int target = (peer.pe + 1) % peer.npes;
