@@ -1,5 +1,5 @@
 file(GLOB src *.cc *.cu)
-set(target ipc)
+set(target p2p-ipc)
 set(ENV{PKG_CONFIG_PATH} "/opt/amazon/efa/lib/pkgconfig")
 set(CMAKE_CUDA_ARCHITECTURES 80 90)
 
